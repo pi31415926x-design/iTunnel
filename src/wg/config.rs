@@ -1,14 +1,24 @@
-use actix_web::{post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
 use serde::Deserialize;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub enum ConnectionStatus {
+    Disconnected,
+    Connecting,
+    Connected,
+    Error,
+}
+
 pub struct WireGuardState {
     pub tun_fd: Option<i32>,
     pub handle: Option<i32>,
+    pub payload: Option<WgConfigPayload>,
+    pub status: ConnectionStatus,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 #[allow(non_snake_case)] // Frontend sends camelCase
 pub struct InterfaceSettings {
     pub address: String,
@@ -19,7 +29,7 @@ pub struct InterfaceSettings {
     pub isGlobal: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 #[allow(non_snake_case)]
 pub struct PeerSettings {
     pub publicKey: String,
@@ -29,10 +39,38 @@ pub struct PeerSettings {
     pub isChangeRoute: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, serde::Serialize, Debug, Clone)]
 pub struct WgConfigPayload {
     pub interface: InterfaceSettings,
     pub peers: PeerSettings,
+}
+
+#[derive(serde::Serialize)]
+pub struct WgStatsResponse {
+    pub rx: u64,
+    pub tx: u64,
+}
+
+#[get("/getwgstats")]
+pub async fn get_wg_stats(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let handle = match state.lock() {
+        Ok(s) => match s.handle {
+            Some(h) => h,
+            None => return HttpResponse::Ok().json(WgStatsResponse { rx: 0, tx: 0 }),
+        },
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match crate::wg::WireGuardApi::get_stats(handle) {
+        Ok((rx, tx)) => HttpResponse::Ok().json(WgStatsResponse { rx, tx }),
+        Err(e) => {
+            error!("Failed to get stats: {}", e);
+            HttpResponse::InternalServerError().body(format!("Failed to get stats: {}", e))
+        }
+    }
 }
 
 #[post("/setwg")]
@@ -41,6 +79,49 @@ pub async fn set_wg_config(
     state: web::Data<Mutex<WireGuardState>>,
 ) -> impl Responder {
     debug!("Received WG Config: {:?}", config);
+
+    let mut state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match apply_wg_config(&mut state, &config) {
+        Ok(_) => {
+            // Save payload to state
+            state.payload = Some(config.into_inner().clone());
+
+            // Serialize payload to JSON for persistence
+            if let Some(payload) = &state.payload {
+                match serde_json::to_string(payload) {
+                    Ok(json_str) => {
+                        if let Err(e) = crate::wg::store::save_config(&json_str) {
+                            error!("Failed to persist config: {}", e);
+                        } else {
+                            info!("Config persisted successfully.");
+                        }
+                    }
+                    Err(e) => error!("Failed to serialize payload: {}", e),
+                }
+            }
+
+            HttpResponse::Ok().body("WireGuard configured successfully")
+        }
+        Err(e) => {
+            error!("Failed to apply WireGuard config: {}", e);
+            HttpResponse::InternalServerError()
+                .body(format!("Failed to apply WireGuard config: {}", e))
+        }
+    }
+}
+
+pub fn apply_wg_config(
+    state: &mut WireGuardState,
+    config: &WgConfigPayload,
+) -> Result<i32, String> {
+    state.status = ConnectionStatus::Connecting;
 
     let private_key = crate::wg::WireGuardApi::base64_to_hex(&config.interface.privateKey)
         .unwrap_or_else(|_| {
@@ -111,14 +192,6 @@ preshared_key={}
     );
     debug!("Generated WireGuard Settings:{}\n", settings);
 
-    let mut state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
     // 1. Ensure TUN device exists
     if state.tun_fd.is_none() {
         info!("Creating TUN device...");
@@ -131,9 +204,8 @@ preshared_key={}
                 state.tun_fd = Some(fd);
             }
             Err(e) => {
-                error!("Failed to create TUN device: {}", e);
-                return HttpResponse::InternalServerError()
-                    .body(format!("Failed to create TUN device: {}", e));
+                state.status = ConnectionStatus::Error;
+                return Err(format!("Failed to create TUN device: {}", e));
             }
         }
     }
@@ -160,7 +232,6 @@ preshared_key={}
                     Ok(ip) => ip,
                     Err(e) => {
                         error!("Failed to detect default gateway: {}", e);
-                        // Fallback to a common default or handle error appropriately
                         "192.168.1.1".to_string()
                     }
                 };
@@ -173,21 +244,21 @@ preshared_key={}
                     endpoint_ip,
                 ) {
                     error!("Failed to configure network: {}", e);
-                    // We don't fail the request here, but we log the error.
-                    // The tunnel might be up but network config failed.
+                    state.status = ConnectionStatus::Error;
+                } else {
+                    state.status = ConnectionStatus::Connected;
                 }
 
-                HttpResponse::Ok().body("WireGuard configured successfully")
+                Ok(handle)
             }
             Err(e) => {
-                error!("Failed to turn on WireGuard: {}", e);
-                HttpResponse::InternalServerError()
-                    .body(format!("Failed to turn on WireGuard: {}", e))
+                state.status = ConnectionStatus::Error;
+                Err(format!("Failed to turn on WireGuard: {}", e))
             }
         }
     } else {
-        error!("TUN FD is missing despite creation attempt.");
-        HttpResponse::InternalServerError().body("TUN device initialization failed")
+        state.status = ConnectionStatus::Error;
+        Err("TUN device initialization failed".to_string())
     }
 }
 

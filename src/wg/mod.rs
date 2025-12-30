@@ -4,13 +4,13 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 pub mod config;
+pub mod store;
 
 // ============================================================================
 // 1. FFI 模块：对应 Go 导出的函数, 参考来源: api-apple.go
 // ============================================================================
 mod ffi {
     use super::*;
-
     // 定义 Logger 回调函数的类型签名
     // 对应 Go 中的 static void callLogger(...)
     pub type LoggerCallback = extern "C" fn(ctx: *mut c_void, level: c_int, msg: *const c_char);
@@ -42,6 +42,9 @@ mod ffi {
 
         // func createTun(name *C.char, mtu int32) int32
         pub fn createTun(name: *const c_char, mtu: c_int) -> c_int;
+
+        // func get wireguard tx and rx bytes
+        pub fn wgGetStats(handle: i32, rx: *mut u64, tx: *mut u64);
 
         // func decodeConfig(encryptConfStr *C.char) *C.char
         // 注意：返回值需要用 libc::free 释放
@@ -190,6 +193,16 @@ impl WireGuardApi {
             .decode(input)
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
         Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+    }
+
+    /// 获取 WireGuard 接口的统计信息 (RX, TX)
+    pub fn get_stats(handle: i32) -> Result<(u64, u64), String> {
+        let mut rx: u64 = 0;
+        let mut tx: u64 = 0;
+        unsafe {
+            ffi::wgGetStats(handle, &mut rx as *mut u64, &mut tx as *mut u64);
+        }
+        Ok((rx, tx))
     }
 }
 

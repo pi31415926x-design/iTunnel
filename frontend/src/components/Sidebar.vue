@@ -19,8 +19,8 @@ defineEmits(["toggle", "close"]);
 const items = [
     { name: "Overview", icon: CursorArrowRippleIcon, to: "/" },
     { name: "Metrics", icon: ArrowTrendingUpIcon, to: "/metrics" },
-    { name: "Logs", icon: Bars4Icon, to: "/logs" },
     { name: "Settings", icon: Cog6ToothIcon, to: "/settings" },
+    { name: "Logs", icon: Bars4Icon, to: "/logs" }
 ];
 </script>
 

@@ -38,7 +38,7 @@ onUnmounted(() => {
 
 <template>
     <div class="
-      min-h-screen flex
+      h-screen w-screen flex overflow-hidden
       bg-slate-50 text-slate-900
       dark:bg-slate-900 dark:text-slate-100
     ">
@@ -54,7 +54,7 @@ onUnmounted(() => {
         />
         
         <!-- Main -->
-        <div class="flex flex-1 flex-col w-full md:w-auto min-h-screen">
+        <div class="flex flex-1 flex-col w-full md:w-auto h-full overflow-hidden relative">
             <!-- Topbar -->
             <Topbar 
                 :sidebar-open="sidebarOpen"
@@ -62,14 +62,14 @@ onUnmounted(() => {
             />
             
             <!-- Content -->
-            <main class="flex-1 w-full">
+            <main class="flex-1 w-full overflow-hidden relative flex flex-col">
                 <router-view />
             </main>
             
             <!-- Footer -->
             <footer class="
-                mt-auto
-                pt-8
+                shrink-0
+                py-4
                 text-center text-xs
                 text-gray-400
                 dark:text-gray-400
