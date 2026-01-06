@@ -1,8 +1,7 @@
-use std::process::Command;
-
-use actix_web::{get, HttpResponse, Responder};
-use log::{debug, info};
+use actix_web::{HttpResponse, Responder};
+use log::info;
 use serde::Serialize;
+use std::process::Command;
 
 #[derive(Serialize, Debug)]
 struct Interface {

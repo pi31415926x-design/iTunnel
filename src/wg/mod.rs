@@ -2,7 +2,6 @@
 use libc::{c_char, c_int, c_longlong, c_void};
 use std::ffi::{CStr, CString};
 use std::ptr;
-
 pub mod config;
 pub mod store;
 
@@ -169,18 +168,26 @@ impl WireGuardApi {
         }
     }
 
-    /// 解密配置 (AmneziaWG 特有功能)
+    /// 解密配置
     pub fn decode_config(encrypt_conf: &str) -> String {
-        let c_conf = CString::new(encrypt_conf).unwrap_or_default();
-        unsafe {
-            let ptr = ffi::decodeConfig(c_conf.as_ptr());
-            if ptr.is_null() {
+        use aes::cipher::{AsyncStreamCipher, KeyIvInit};
+        use base64::{engine::general_purpose, Engine as _};
+        type Aes128CfbDec = cfb_mode::Decryptor<aes::Aes128>;
+        let key = [0x42; 16];
+        let iv = [0x24; 16];
+        let encrypted_bytes = match general_purpose::STANDARD.decode(encrypt_conf) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("Failed to decode base64 config: {}", e);
                 return "{}".to_string();
             }
-            let res = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            libc::free(ptr as *mut c_void); // 必须释放 Go 分配的内存
-            res
-        }
+        };
+        let mut buf = encrypted_bytes;
+        Aes128CfbDec::new(&key.into(), &iv.into()).decrypt(&mut buf);
+        String::from_utf8(buf).unwrap_or_else(|e| {
+            log::error!("Failed to parse decrypted config as UTF-8: {}", e);
+            "{}".to_string()
+        })
     }
 
     pub fn bump_sockets(handle: i32) {
@@ -201,6 +208,8 @@ impl WireGuardApi {
         let mut tx: u64 = 0;
         unsafe {
             ffi::wgGetStats(handle, &mut rx as *mut u64, &mut tx as *mut u64);
+            //dump wireguard config
+            //debug!("WireGuard Config is: {:?}", Self::get_config(handle));
         }
         Ok((rx, tx))
     }

@@ -12,8 +12,8 @@ export const router = createRouter({
       component: () => import("../pages/Logs.vue"),
     },
     {
-      path: "/metrics",
-      component: () => import("../pages/Metrics.vue"),
+      path: "/subscribe",
+      component: () => import("../pages/Subscribe.vue"),
     },
     {
       path: "/settings",

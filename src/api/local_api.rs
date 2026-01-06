@@ -1,0 +1,292 @@
+use crate::api::remote_api::{SubscribeRequest, SubscriptionPlan};
+use crate::speedtest;
+use crate::wg::config::WireGuardState;
+use actix_web::{get, post, web, HttpResponse, Responder};
+use log::{debug, error, info};
+use serde::Deserialize;
+use std::sync::Mutex;
+
+#[get("/api/logs")]
+pub async fn get_logs() -> impl Responder {
+    let logs = crate::logging::get_recent_logs();
+    HttpResponse::Ok().json(logs)
+}
+
+#[get("/api/user_info")]
+pub async fn user_info_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let device_id = match crate::config::machine_id::get_machine_id() {
+        Ok(id) => id,
+        Err(e) => return HttpResponse::InternalServerError().body(e),
+    };
+
+    let state_lock = state.lock().unwrap();
+    // Re-verify to get the latest expiration from the token/claims
+    match state_lock.api_client.verify_device(&device_id).await {
+        Ok(_) => {
+            // After verify_device, the token is updated. We can parse it to get exp.
+            let token_opt = state_lock.api_client.token.lock().unwrap().clone();
+            if let Some(token) = token_opt {
+                if let Ok(claims) = crate::api::jwt::parse_jwt(&token) {
+                    let expire_date = chrono::DateTime::from_timestamp(claims.exp, 0)
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    return HttpResponse::Ok().json(serde_json::json!({
+                        "device_id": device_id,
+                        "expire": expire_date
+                    }));
+                }
+            }
+            HttpResponse::Ok().json(serde_json::json!({
+                "device_id": device_id,
+                "expire": "Expired"
+            }))
+        }
+        Err(e) => HttpResponse::InternalServerError().body(e),
+    }
+}
+
+#[get("/api/subscribe_plans")]
+pub async fn subscribe_plans_handler() -> impl Responder {
+    let plans = vec![
+        SubscriptionPlan {
+            name: "Monthly".to_string(),
+            duration: "1 Month".to_string(),
+            price: 29.0,
+            features: vec![
+                "Access to all nodes".to_string(),
+                "No speed limit".to_string(),
+                "Unlimited traffic".to_string(),
+                "Stable connection".to_string(),
+            ],
+            popular: false,
+            cta: "Select monthly".to_string(),
+        },
+        SubscriptionPlan {
+            name: "Quarterly".to_string(),
+            duration: "3 Months".to_string(),
+            price: 75.0,
+            features: vec![
+                "Access to all nodes".to_string(),
+                "No speed limit".to_string(),
+                "Unlimited traffic".to_string(),
+                "Stable connection".to_string(),
+                "Save 14% vs Monthly".to_string(),
+            ],
+            popular: false,
+            cta: "Select quarterly".to_string(),
+        },
+        SubscriptionPlan {
+            name: "Semi-Annual".to_string(),
+            duration: "6 Months".to_string(),
+            price: 140.0,
+            features: vec![
+                "Access to all nodes".to_string(),
+                "No speed limit".to_string(),
+                "Unlimited traffic".to_string(),
+                "Stable connection".to_string(),
+                "Save 19% vs Monthly".to_string(),
+            ],
+            popular: true,
+            cta: "Select semi-annual".to_string(),
+        },
+        SubscriptionPlan {
+            name: "Annual".to_string(),
+            duration: "1 Year".to_string(),
+            price: 260.0,
+            features: vec![
+                "Access to all nodes".to_string(),
+                "No speed limit".to_string(),
+                "Unlimited traffic".to_string(),
+                "Stable connection".to_string(),
+                "Save 25% vs Monthly".to_string(),
+                "Priority support".to_string(),
+            ],
+            popular: false,
+            cta: "Select annual".to_string(),
+        },
+    ];
+    HttpResponse::Ok().json(plans)
+}
+
+#[get("/api/speedtest")]
+pub async fn speed_test_handler() -> impl Responder {
+    let results = speedtest::run_speed_test().await;
+    HttpResponse::Ok().json(results)
+}
+
+#[get("/api/servers")]
+pub async fn speed_test_servers_handler() -> impl Responder {
+    let servers = speedtest::get_servers();
+    HttpResponse::Ok().json(servers)
+}
+
+#[derive(Deserialize, Debug)]
+pub struct SwitchNodeRequest {
+    pub ip: String,
+}
+
+fn replace_endpoint_ip(input: &str, new_ip: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|token| {
+            if let Some(value) = token.strip_prefix("Endpoint=") {
+                if let Some((_, port)) = value.split_once(':') {
+                    format!("Endpoint={}:{}", new_ip, port)
+                } else {
+                    token.to_string()
+                }
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[post("/api/switch_node")]
+pub async fn switch_node_handler(
+    req: web::Json<SwitchNodeRequest>,
+    state: web::Data<Mutex<WireGuardState>>,
+) -> impl Responder {
+    info!("🔄 Switching to node IP: {}", req.ip);
+
+    let mut state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    // 1. Update the state with the new endpoint
+    if let Err(e) = state.update_endpoint(&req.ip) {
+        error!("Failed to update endpoint: {}", e);
+        return HttpResponse::InternalServerError().body(e);
+    }
+
+    // 2. Apply the updated config (which will handle stopping the old session)
+    /// TODO: should be use set_config
+    ///
+    let old_config = state.config.clone().unwrap();
+    info!("the old config is : {}", old_config);
+    info!("to update new endpoint ip:{}", &req.ip);
+    let new_config = replace_endpoint_ip(&old_config, &req.ip);
+    info!("the new config is : {}", new_config);
+    match crate::wg::WireGuardApi::set_config(state.handle.unwrap(), &new_config) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "status": "success", "ip": req.ip })),
+        Err(e) => {
+            error!("Failed to apply config during switch: {}", e);
+            HttpResponse::InternalServerError().body("Failed to apply config during switch")
+        }
+    }
+    /*
+        match crate::wg::config::apply_wg_config(&mut state) {
+        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "status": "success", "ip": req.ip })),
+        Err(e) => {
+            error!("Failed to apply config during switch: {}", e);
+            HttpResponse::InternalServerError().body(e)
+        }
+    }
+     */
+}
+
+#[post("/api/connect")]
+pub async fn connect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    info!("🚀 Connection request received from Overview");
+    let mut state_lock = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    if state_lock.status == crate::wg::config::ConnectionStatus::Connected {
+        return HttpResponse::Ok().json(serde_json::json!({ "status": "already_connected" }));
+    }
+
+    // try to get config from remote
+    let config = state_lock
+        .api_client
+        .get_desktop_cfg(&state_lock.device_id)
+        .await;
+
+    match config {
+        Ok(cfg) => {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cfg) {
+                if let Some(encrypted) = json["wgcfgparam"].as_str() {
+                    let decoded_str = crate::wg::WireGuardApi::decode_config(encrypted);
+                    state_lock.config = Some(decoded_str);
+                    match crate::wg::config::apply_wg_config(&mut *state_lock) {
+                        Ok(_) => {
+                            state_lock.status = crate::wg::config::ConnectionStatus::Connected;
+                        }
+                        Err(e) => {
+                            error!("Failed to apply config: {}", e);
+                        }
+                    }
+                } else {
+                    error!("'gcfgparam' not found in remote config");
+                }
+            } else {
+                error!("Failed to parse remote response as JSON: {}", cfg);
+            }
+        }
+        Err(e) => {
+            ///TODO: 频繁出现:
+            /// Failed to get config from remote: Request failed:
+            /// error sending request for url (https://iedux.pro/wgx/api/get_desktop_cfg)
+            error!("Failed to get config from remote: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to get config from remote");
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "status": "success" }))
+}
+
+#[post("/api/disconnect")]
+pub async fn disconnect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    info!("🛑 Disconnection request received from Overview");
+    let mut state_lock = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    if state_lock.handle.is_some() {
+        let _ = state_lock.stop_and_cleanup();
+        info!("✅ WireGuard tunnel turned off and routes cleared via API");
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({ "status": "success" }))
+}
+
+#[post("/api/subscribe_req")]
+pub async fn subscribe_req_handler(
+    req: web::Json<SubscribeRequest>,
+    state: web::Data<Mutex<WireGuardState>>,
+) -> impl Responder {
+    debug!("🔔 Received Local Subscription Request: {:?}", req);
+
+    let state_lock = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match state_lock.api_client.subscribe_req(&req).await {
+        Ok(resp) => {
+            info!("✅ Subscription Request Forwarded Successfully: {}", resp);
+            HttpResponse::Ok().body(resp)
+        }
+        Err(e) => {
+            error!("❌ Failed to forward subscription request: {}", e);
+            HttpResponse::InternalServerError().body(e.to_string())
+        }
+    }
+}

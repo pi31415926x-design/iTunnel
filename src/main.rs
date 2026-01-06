@@ -1,93 +1,17 @@
 use actix_files::Files;
-use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
-use itunnel::{interface::get_interfaces, logging};
-use std::process::Command;
+use actix_web::{web, App, HttpServer};
+use itunnel::{api::local_api, interface::get_interfaces, logging, wg::config::WireGuardState};
+use log::{debug, error, info};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     Manager,
 };
 use tauri_plugin_opener::OpenerExt;
-
-// 设置NAT的函数
-fn set_nat(interface_alias: &str) -> String {
-    let script = format!(
-        "New-NetNat -Name 'LAN-NAT' -InternalIPInterfaceAddressPrefix '{}'",
-        interface_alias
-    );
-    let _output = Command::new("powershell")
-        .args(["-Command", &script])
-        .output()
-        .expect("Failed to execute command");
-
-    String::from_utf8_lossy(&_output.stdout).trim().to_string()
-}
-
-// 设置interface转发启用的函数
-fn set_forward_enable(interface_alias: &str) -> String {
-    let script = format!(
-        "netsh interface ipv4 set interface '{}' forwarding=enabled",
-        interface_alias
-    );
-
-    let _output = Command::new("powershell")
-        .args(["-Command", &script])
-        .output()
-        .expect("Failed to execute command");
-
-    String::from_utf8_lossy(&_output.stdout).trim().to_string()
-}
-
-// 获取默认网络接口别名的函数
-fn get_interface_alias() -> String {
-    let script = "
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; 
-        (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric)[0] | Get-NetIPInterface | Select-Object -ExpandProperty InterfaceAlias
-    ";
-
-    let output = Command::new("powershell")
-        .args(["-Command", script])
-        .output()
-        .expect("Failed to execute command");
-
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-// --- Actix-web 部分 ---
-
-#[get("/")]
-async fn hello() -> impl Responder {
-    let interface_alias = "get_interface_alias()";
-    println!("Retrieved Interface Alias: {}", interface_alias);
-    let html_content = format!(
-        r#"<!DOCTYPE html>
-        <html>
-            <head><meta charset="utf-8"></head>
-            <body>
-                <h1>Tauri Hello</h1>
-                <p>你好，这是后台服务</p>
-                <p>Interface Alias: {}</p>
-            </body>
-        </html>"#,
-        interface_alias
-    );
-
-    HttpResponse::Ok()
-        // 关键点：显式设置内容类型和字符集
-        .content_type("text/html; charset=utf-8")
-        .body(html_content)
-}
-
-#[get("/logs")]
-async fn get_logs() -> impl Responder {
-    let logs = itunnel::logging::get_recent_logs();
-    HttpResponse::Ok().json(logs)
-}
-
-use itunnel::wg::config::WireGuardState;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
 async fn start_actix_server(
     static_dir: PathBuf,
     wg_state: Arc<Mutex<WireGuardState>>,
@@ -105,11 +29,22 @@ async fn start_actix_server(
         App::new()
             //.wrap(cors)
             .app_data(wg_data.clone())
-            //.service(hello) // 注册路由
             .service(get_interfaces)
             .service(itunnel::wg::config::set_wg_config)
             .service(itunnel::wg::config::get_wg_stats)
-            .service(get_logs)
+            .service(local_api::get_logs)
+            .service(local_api::user_info_handler)
+            // .service(local_api::get_device_id_handler) // Replaced by user_info_handler
+            .service(local_api::subscribe_plans_handler)
+            .service(local_api::speed_test_handler)
+            .service(local_api::speed_test_servers_handler)
+            .service(itunnel::wg::config::enable_gateway_api)
+            .service(itunnel::wg::config::disable_gateway_api)
+            .service(itunnel::wg::config::gateway_status_api)
+            .service(local_api::connect_handler)
+            .service(local_api::disconnect_handler)
+            .service(local_api::switch_node_handler)
+            .service(local_api::subscribe_req_handler)
             .service(Files::new("/", static_path.as_ref()).index_file("index.html"))
     })
     .bind(("127.0.0.1", 8181))?
@@ -120,7 +55,7 @@ async fn start_actix_server(
 // --- Tauri 主程序部分 ---
 
 fn main() {
-    /// init logging
+    // init logging
     logging::init();
 
     // Create shared state
@@ -128,29 +63,59 @@ fn main() {
         Ok(Some(json_str)) => {
             match serde_json::from_str::<itunnel::wg::config::WgConfigPayload>(&json_str) {
                 Ok(p) => {
-                    println!("📄 Loaded config payload from store");
+                    debug!("📄 Loaded config payload from store");
                     Some(p)
                 }
                 Err(e) => {
-                    eprintln!("⚠️ Failed to parse config payload: {}", e);
+                    error!("⚠️ Failed to parse config payload: {}", e);
                     None
                 }
             }
         }
         Ok(None) => None,
         Err(e) => {
-            eprintln!("⚠️ Failed to load config: {}", e);
+            error!("⚠️ Failed to load config: {}", e);
             None
         }
     };
 
+    let api_client = itunnel::api::remote_api::ApiClient::new();
+    let device_id =
+        itunnel::config::machine_id::get_machine_id().unwrap_or_else(|_| "unknown".to_string());
+
+    // Perform initial device verification in a separate task/thread if we want it to be non-blocking,
+    // or just let the first request handle it. For now, let's just initialize.
+
     let wg_state = Arc::new(Mutex::new(WireGuardState {
+        device_id,
         tun_fd: None,
         handle: None,
         payload: initial_payload,
         status: itunnel::wg::config::ConnectionStatus::Disconnected,
+        api_client,
+        gateway_enabled: false,
+        active_endpoint: None,
+        ..Default::default()
     }));
 
+    // 0. Add signal handler for Ctrl+C (terminal usage)
+    let wg_state_sig = wg_state.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            if let Ok(_) = tokio::signal::ctrl_c().await {
+                info!("收到 Ctrl+C (SIGINT) 信号，正在执行清理并退出...");
+                let mut state = wg_state_sig.lock().unwrap();
+                let _ = state.stop_and_cleanup();
+                std::process::exit(0);
+            }
+        });
+    });
+
+    let wg_state_run = wg_state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
@@ -246,16 +211,39 @@ fn main() {
                                 println!("Tray: Disconnecting...");
                                 itunnel::wg::WireGuardApi::turn_off(handle);
                                 state.handle = None;
+                                if let Err(e) =
+                                    itunnel::wg::config::clear_network_config(&mut *state)
+                                {
+                                    eprintln!("Tray: Failed to clear network config: {}", e);
+                                }
+                                if state.gateway_enabled {
+                                    let _ = itunnel::interface::gateway::disable_gateway();
+                                    state.gateway_enabled = false;
+                                }
                                 state.status = itunnel::wg::config::ConnectionStatus::Disconnected;
                             } else {
                                 // Connect
                                 println!("Tray: Connecting...");
-                                // Clone payload to avoid borrow issues
-                                if let Some(payload) = state.payload.clone() {
-                                    match itunnel::wg::config::apply_wg_config(
-                                        &mut *state,
-                                        &payload,
-                                    ) {
+                                // try to get config from remote
+                                let device_id = state.device_id.clone();
+                                let config_res = tauri::async_runtime::block_on(
+                                    state.api_client.get_desktop_cfg(&device_id),
+                                );
+
+                                if let Ok(cfg) = config_res {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&cfg)
+                                    {
+                                        if let Some(encrypted) = json["wgcfgparam"].as_str() {
+                                            let decoded_str =
+                                                itunnel::wg::WireGuardApi::decode_config(encrypted);
+                                            state.config = Some(decoded_str);
+                                        }
+                                    }
+                                }
+
+                                if state.payload.is_some() || state.config.is_some() {
+                                    match itunnel::wg::config::apply_wg_config(&mut *state) {
                                         Ok(handle) => {
                                             println!(
                                                 "Tray: Connected successfully, handle {}",
@@ -265,7 +253,7 @@ fn main() {
                                         Err(e) => eprintln!("Tray: Failed to connect: {}", e),
                                     }
                                 } else {
-                                    println!("Tray: No config found. Opening config page.");
+                                    error!("Tray: No config found. Opening config page.");
                                     let _ = app
                                         .opener()
                                         .open_url("http://127.0.0.1:8181", None::<&str>);
@@ -277,6 +265,8 @@ fn main() {
                             let _ = app.opener().open_url(url, None::<&str>);
                         }
                         "quit" => {
+                            let mut state = wg_state.lock().unwrap();
+                            let _ = state.stop_and_cleanup();
                             app.exit(0);
                         }
                         _ => {}
@@ -331,6 +321,14 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => {
+                info!("📥 Exit requested, cleaning up...");
+                let mut state = wg_state_run.lock().unwrap();
+                let _ = state.stop_and_cleanup();
+            }
+            _ => {}
+        });
 }

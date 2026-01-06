@@ -1,7 +1,8 @@
 use actix_web::{get, HttpResponse, Responder};
+use log::info;
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use serde::Serialize;
-use log::info;
+pub mod gateway;
 
 #[derive(Serialize)]
 struct InterfaceInfo {
@@ -19,7 +20,7 @@ struct ApiResp<T> {
 #[get("/api/interfaces")]
 pub async fn get_interfaces() -> impl Responder {
     info!("Fetching physical network interfaces");
-    
+
     let interfaces = match NetworkInterface::show() {
         Ok(itfs) => itfs,
         Err(e) => {
@@ -30,13 +31,13 @@ pub async fn get_interfaces() -> impl Responder {
         }
     };
 
-    // Filter for physical interfaces: 
+    // Filter for physical interfaces:
     // We use heuristics to exclude common virtual interface names and patterns.
     let physical_interfaces: Vec<InterfaceInfo> = interfaces
         .into_iter()
         .filter(|itf| {
             let name = itf.name.to_lowercase();
-            
+
             // 1. Exclude loopback
             if name.contains("loopback") || name.contains("lo0") || name == "lo" {
                 return false;
@@ -44,11 +45,27 @@ pub async fn get_interfaces() -> impl Responder {
 
             // 2. Exclude common virtual/software interface keywords
             let virtual_keywords = [
-                "docker", "veth", "br-", "br0", "bridge", "tun", "tap", 
-                "vpn", "virtual", "hyper-v", "vbox", "vmnet", "vmware",
-                "utun", "wg", "tailscale", "zerotier", "ppp", "vEthernet"
+                "docker",
+                "veth",
+                "br-",
+                "br0",
+                "bridge",
+                "tun",
+                "tap",
+                "vpn",
+                "virtual",
+                "hyper-v",
+                "vbox",
+                "vmnet",
+                "vmware",
+                "utun",
+                "wg",
+                "tailscale",
+                "zerotier",
+                "ppp",
+                "vEthernet",
             ];
-            
+
             if virtual_keywords.iter().any(|&kw| name.contains(kw)) {
                 return false;
             }
@@ -78,3 +95,50 @@ pub async fn get_interfaces() -> impl Responder {
         data: physical_interfaces,
     })
 }
+
+/*
+// 设置NAT的函数
+fn set_nat(interface_alias: &str) -> String {
+    let script = format!(
+        "New-NetNat -Name 'LAN-NAT' -InternalIPInterfaceAddressPrefix '{}'",
+        interface_alias
+    );
+    let _output = Command::new("powershell")
+        .args(["-Command", &script])
+        .output()
+        .expect("Failed to execute command");
+
+    String::from_utf8_lossy(&_output.stdout).trim().to_string()
+}
+
+// 设置interface转发启用的函数
+fn set_forward_enable(interface_alias: &str) -> String {
+    let script = format!(
+        "netsh interface ipv4 set interface '{}' forwarding=enabled",
+        interface_alias
+    );
+
+    let _output = Command::new("powershell")
+        .args(["-Command", &script])
+        .output()
+        .expect("Failed to execute command");
+
+    String::from_utf8_lossy(&_output.stdout).trim().to_string()
+}
+
+// 获取默认网络接口别名的函数
+fn get_interface_alias() -> String {
+    let script = "
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
+        (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric)[0] | Get-NetIPInterface | Select-Object -ExpandProperty InterfaceAlias
+    ";
+
+    let output = Command::new("powershell")
+        .args(["-Command", script])
+        .output()
+        .expect("Failed to execute command");
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+*/
