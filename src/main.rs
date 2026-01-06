@@ -1,6 +1,6 @@
 use actix_files::Files;
 use actix_web::{web, App, HttpServer};
-use itunnel::{api::local_api, interface::get_interfaces, logging, wg::config::WireGuardState};
+use itunnel::{api::local_api, logging, wg::config::WireGuardState};
 use log::{debug, error, info};
 use std::{
     path::PathBuf,
@@ -29,18 +29,18 @@ async fn start_actix_server(
         App::new()
             //.wrap(cors)
             .app_data(wg_data.clone())
-            .service(get_interfaces)
-            .service(itunnel::wg::config::set_wg_config)
-            .service(itunnel::wg::config::get_wg_stats)
+            .service(local_api::get_interfaces)
+            .service(local_api::set_wg_config)
+            .service(local_api::get_wg_stats)
             .service(local_api::get_logs)
             .service(local_api::user_info_handler)
             // .service(local_api::get_device_id_handler) // Replaced by user_info_handler
             .service(local_api::subscribe_plans_handler)
             .service(local_api::speed_test_handler)
             .service(local_api::speed_test_servers_handler)
-            .service(itunnel::wg::config::enable_gateway_api)
-            .service(itunnel::wg::config::disable_gateway_api)
-            .service(itunnel::wg::config::gateway_status_api)
+            .service(local_api::enable_gateway_api)
+            .service(local_api::disable_gateway_api)
+            .service(local_api::gateway_status_api)
             .service(local_api::connect_handler)
             .service(local_api::disconnect_handler)
             .service(local_api::switch_node_handler)

@@ -1,8 +1,6 @@
-use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::{collections::HashSet, default::Default, sync::Mutex};
+use std::default::Default;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ConnectionStatus {
@@ -14,24 +12,24 @@ pub enum ConnectionStatus {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
-struct Interface {
-    private_key: String,
-    listen_port: u16,
-    address: String,
-    dns: Vec<String>,
-    mtu: u16,
+pub struct Interface {
+    pub private_key: String,
+    pub listen_port: u16,
+    pub address: String,
+    pub dns: Vec<String>,
+    pub mtu: u16,
 }
 #[derive(Serialize, Deserialize, Default, Debug)]
-struct Peer {
-    public_key: String,
-    preshared_key: String,
-    allowed_ips: Vec<String>,
-    endpoint: String,
+pub struct Peer {
+    pub public_key: String,
+    pub preshared_key: String,
+    pub allowed_ips: Vec<String>,
+    pub endpoint: String,
 }
 #[derive(Serialize, Deserialize, Default, Debug)]
-struct Wg {
-    interface: Interface,
-    peers: Vec<Peer>,
+pub struct Wg {
+    pub interface: Interface,
+    pub peers: Vec<Peer>,
 }
 
 #[derive(Debug, Default)]
@@ -212,183 +210,9 @@ pub struct WgConfigPayload {
     pub peers: PeerSettings,
 }
 
-#[derive(serde::Serialize)]
-pub struct WgStatsResponse {
-    pub rx: u64,
-    pub tx: u64,
-    pub peers: u32,
-    pub status: ConnectionStatus,
-    pub gateway_enabled: bool,
-}
-
-#[get("/api/getwgstats")]
-pub async fn get_wg_stats(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let (handle, status) = match state.lock() {
-        Ok(s) => match s.handle {
-            Some(h) => (h, s.status),
-            None => {
-                return HttpResponse::Ok().json(WgStatsResponse {
-                    rx: 0,
-                    tx: 0,
-                    peers: 0,
-                    status: s.status,
-                    gateway_enabled: s.gateway_enabled,
-                })
-            }
-        },
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
-    match crate::wg::WireGuardApi::get_stats(handle) {
-        Ok((rx, tx)) => {
-            let gateway_enabled = match state.lock() {
-                Ok(s) => s.gateway_enabled,
-                Err(_) => false,
-            };
-            HttpResponse::Ok().json(WgStatsResponse {
-                rx,
-                tx,
-                peers: 1,
-                status,
-                gateway_enabled,
-            })
-        }
-        Err(e) => {
-            error!("Failed to get stats: {}", e);
-            HttpResponse::InternalServerError().body(format!("Failed to get stats: {}", e))
-        }
-    }
-}
-
-#[post("/api/setwg")]
-pub async fn set_wg_config(
-    config: web::Json<WgConfigPayload>,
-    state: web::Data<Mutex<WireGuardState>>,
-) -> impl Responder {
-    debug!("Received WG Config: {:?}", config);
-
-    let mut state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
-    match apply_wg_config(&mut state) {
-        Ok(_) => {
-            // Save payload to state
-            state.payload = Some(config.into_inner().clone());
-
-            // Serialize payload to JSON for persistence
-            if let Some(payload) = &state.payload {
-                match serde_json::to_string(payload) {
-                    Ok(json_str) => {
-                        if let Err(e) = crate::wg::store::save_config(&json_str) {
-                            error!("Failed to persist config: {}", e);
-                        } else {
-                            info!("Config persisted successfully.");
-                        }
-                    }
-                    Err(e) => error!("Failed to serialize payload: {}", e),
-                }
-            }
-
-            HttpResponse::Ok().body("WireGuard configured successfully")
-        }
-        Err(e) => {
-            error!("Failed to apply WireGuard config: {}", e);
-            HttpResponse::InternalServerError()
-                .body(format!("Failed to apply WireGuard config: {}", e))
-        }
-    }
-}
-
-#[post("/api/gateway/on")]
-pub async fn enable_gateway_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let mut state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
-    if state.status != ConnectionStatus::Connected {
-        return HttpResponse::BadRequest().body("VPN must be connected to enable gateway mode");
-    }
-
-    match crate::interface::gateway::enable_gateway("utun9981") {
-        Ok(_) => {
-            state.gateway_enabled = true;
-            HttpResponse::Ok().body("Gateway mode enabled")
-        }
-        Err(e) => {
-            error!("Failed to enable gateway: {}", e);
-            HttpResponse::InternalServerError().body(format!("Failed to enable gateway: {}", e))
-        }
-    }
-}
-
-#[post("/api/gateway/off")]
-pub async fn disable_gateway_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let mut state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
-    match crate::interface::gateway::disable_gateway() {
-        Ok(_) => {
-            state.gateway_enabled = false;
-            HttpResponse::Ok().body("Gateway mode disabled")
-        }
-        Err(e) => {
-            error!("Failed to disable gateway: {}", e);
-            HttpResponse::InternalServerError().body(format!("Failed to disable gateway: {}", e))
-        }
-    }
-}
-
-#[get("/api/gateway/status")]
-pub async fn gateway_status_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
-    };
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "enabled": state.gateway_enabled
-    }))
-}
-
-fn remove_keys(input: &str, keys: &[&str]) -> String {
-    let remove: HashSet<&str> = keys.iter().copied().collect();
-
-    input
-        .lines()
-        .filter(|line| {
-            let line = line.trim_start();
-            match line.split_once('=') {
-                Some((key, _)) => !remove.contains(key),
-                None => true, // 非 key=value 行，保留
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
     // 0. Initial preparation of config string
-    let mut config = state.config.clone().unwrap_or_default();
+    let config = state.config.clone().unwrap_or_default();
     state.status = ConnectionStatus::Connecting;
     // 1. Ensure TUN device exists
     if state.tun_fd.is_none() {

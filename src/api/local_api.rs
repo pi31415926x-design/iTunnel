@@ -1,10 +1,33 @@
 use crate::api::remote_api::{SubscribeRequest, SubscriptionPlan};
 use crate::speedtest;
-use crate::wg::config::WireGuardState;
+use crate::wg::config::{ConnectionStatus, WgConfigPayload, WireGuardState};
 use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
-use serde::Deserialize;
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+
+#[derive(Serialize)]
+pub struct WgStatsResponse {
+    pub rx: u64,
+    pub tx: u64,
+    pub peers: u32,
+    pub status: ConnectionStatus,
+    pub gateway_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct InterfaceInfo {
+    name: String,
+    index: u32,
+    addr: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ApiResp<T> {
+    success: bool,
+    data: T,
+}
 
 #[get("/api/logs")]
 pub async fn get_logs() -> impl Responder {
@@ -166,8 +189,8 @@ pub async fn switch_node_handler(
     }
 
     // 2. Apply the updated config (which will handle stopping the old session)
-    /// TODO: should be use set_config
-    ///
+    // TODO: should be use set_config
+    //
     let old_config = state.config.clone().unwrap();
     info!("the old config is : {}", old_config);
     info!("to update new endpoint ip:{}", &req.ip);
@@ -234,9 +257,9 @@ pub async fn connect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Re
             }
         }
         Err(e) => {
-            ///TODO: 频繁出现:
-            /// Failed to get config from remote: Request failed:
-            /// error sending request for url (https://iedux.pro/wgx/api/get_desktop_cfg)
+            // TODO: 频繁出现:
+            // Failed to get config from remote: Request failed:
+            // error sending request for url (https://iedux.pro/wgx/api/get_desktop_cfg)
             error!("Failed to get config from remote: {}", e);
             return HttpResponse::InternalServerError().body("Failed to get config from remote");
         }
@@ -262,6 +285,223 @@ pub async fn disconnect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl
     }
 
     HttpResponse::Ok().json(serde_json::json!({ "status": "success" }))
+}
+
+#[get("/api/getwgstats")]
+pub async fn get_wg_stats(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let (handle, status) = match state.lock() {
+        Ok(s) => match s.handle {
+            Some(h) => (h, s.status),
+            None => {
+                return HttpResponse::Ok().json(WgStatsResponse {
+                    rx: 0,
+                    tx: 0,
+                    peers: 0,
+                    status: s.status,
+                    gateway_enabled: s.gateway_enabled,
+                })
+            }
+        },
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match crate::wg::WireGuardApi::get_stats(handle) {
+        Ok((rx, tx)) => {
+            let gateway_enabled = match state.lock() {
+                Ok(s) => s.gateway_enabled,
+                Err(_) => false,
+            };
+            HttpResponse::Ok().json(WgStatsResponse {
+                rx,
+                tx,
+                peers: 1,
+                status,
+                gateway_enabled,
+            })
+        }
+        Err(e) => {
+            error!("Failed to get stats: {}", e);
+            HttpResponse::InternalServerError().body(format!("Failed to get stats: {}", e))
+        }
+    }
+}
+
+#[post("/api/setwg")]
+pub async fn set_wg_config(
+    config: web::Json<WgConfigPayload>,
+    state: web::Data<Mutex<WireGuardState>>,
+) -> impl Responder {
+    debug!("Received WG Config: {:?}", config);
+
+    let mut state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match crate::wg::config::apply_wg_config(&mut state) {
+        Ok(_) => {
+            // Save payload to state
+            state.payload = Some(config.into_inner().clone());
+
+            // Serialize payload to JSON for persistence
+            if let Some(payload) = &state.payload {
+                match serde_json::to_string(payload) {
+                    Ok(json_str) => {
+                        if let Err(e) = crate::wg::store::save_config(&json_str) {
+                            error!("Failed to persist config: {}", e);
+                        } else {
+                            info!("Config persisted successfully.");
+                        }
+                    }
+                    Err(e) => error!("Failed to serialize payload: {}", e),
+                }
+            }
+
+            HttpResponse::Ok().body("WireGuard configured successfully")
+        }
+        Err(e) => {
+            error!("Failed to apply WireGuard config: {}", e);
+            HttpResponse::InternalServerError()
+                .body(format!("Failed to apply WireGuard config: {}", e))
+        }
+    }
+}
+
+#[post("/api/gateway/on")]
+pub async fn enable_gateway_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let mut state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    if state.status != ConnectionStatus::Connected {
+        return HttpResponse::BadRequest().body("VPN must be connected to enable gateway mode");
+    }
+
+    match crate::interface::gateway::enable_gateway("utun9981") {
+        Ok(_) => {
+            state.gateway_enabled = true;
+            HttpResponse::Ok().body("Gateway mode enabled")
+        }
+        Err(e) => {
+            error!("Failed to enable gateway: {}", e);
+            HttpResponse::InternalServerError().body(format!("Failed to enable gateway: {}", e))
+        }
+    }
+}
+
+#[post("/api/gateway/off")]
+pub async fn disable_gateway_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let mut state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    match crate::interface::gateway::disable_gateway() {
+        Ok(_) => {
+            state.gateway_enabled = false;
+            HttpResponse::Ok().body("Gateway mode disabled")
+        }
+        Err(e) => {
+            error!("Failed to disable gateway: {}", e);
+            HttpResponse::InternalServerError().body(format!("Failed to disable gateway: {}", e))
+        }
+    }
+}
+
+#[get("/api/gateway/status")]
+pub async fn gateway_status_api(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let state = match state.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "enabled": state.gateway_enabled
+    }))
+}
+
+#[get("/api/interfaces")]
+pub async fn get_interfaces() -> impl Responder {
+    info!("Fetching physical network interfaces");
+
+    let interfaces = match NetworkInterface::show() {
+        Ok(itfs) => itfs,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResp {
+                success: false,
+                data: format!("Failed to fetch interfaces: {}", e),
+            });
+        }
+    };
+
+    // Filter for physical interfaces
+    let physical_interfaces: Vec<InterfaceInfo> = interfaces
+        .into_iter()
+        .filter(|itf| {
+            let name = itf.name.to_lowercase();
+            if name.contains("loopback") || name.contains("lo0") || name == "lo" {
+                return false;
+            }
+            let virtual_keywords = [
+                "docker",
+                "veth",
+                "br-",
+                "br0",
+                "bridge",
+                "tun",
+                "tap",
+                "vpn",
+                "virtual",
+                "hyper-v",
+                "vbox",
+                "vmnet",
+                "vmware",
+                "utun",
+                "wg",
+                "tailscale",
+                "zerotier",
+                "ppp",
+                "vEthernet",
+            ];
+            if virtual_keywords.iter().any(|&kw| name.contains(kw)) {
+                return false;
+            }
+            if let Some(mac) = &itf.mac_addr {
+                if mac == "00:00:00:00:00:00" {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            true
+        })
+        .map(|itf| InterfaceInfo {
+            name: itf.name,
+            index: itf.index,
+            addr: itf.addr.into_iter().map(|a| a.ip().to_string()).collect(),
+        })
+        .collect();
+
+    HttpResponse::Ok().json(ApiResp {
+        success: true,
+        data: physical_interfaces,
+    })
 }
 
 #[post("/api/subscribe_req")]

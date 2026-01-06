@@ -47,6 +47,7 @@ mod ffi {
 
         // func decodeConfig(encryptConfStr *C.char) *C.char
         // 注意：返回值需要用 libc::free 释放
+        #[allow(dead_code)]
         pub fn decodeConfig(encrypt_conf_str: *const c_char) -> *mut c_char;
     }
 }
