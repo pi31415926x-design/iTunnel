@@ -1,5 +1,6 @@
 //我们将代码分为两部分：ffi (原始接口) 和 safe (安全封装)。
 use libc::{c_char, c_int, c_longlong, c_void};
+use log::{debug, set_logger};
 use std::ffi::{CStr, CString};
 use std::ptr;
 pub mod config;
@@ -44,6 +45,9 @@ mod ffi {
 
         // func get wireguard tx and rx bytes
         pub fn wgGetStats(handle: i32, rx: *mut u64, tx: *mut u64);
+
+        // func wgEnableInterferenceDetection()
+        pub fn wgEnableInterferenceDetection(handle: i32, enable: bool);
 
         // func decodeConfig(encryptConfStr *C.char) *C.char
         // 注意：返回值需要用 libc::free 释放
@@ -131,11 +135,15 @@ impl WireGuardApi {
 
     /// 开启 WireGuard 隧道
     pub fn turn_on(settings: &str, tun_fd: i32) -> Result<i32, String> {
+        let mut settings = settings.to_string();
+        debug!("wgTurnOn with config: {}", settings);
         let c_settings = CString::new(settings).map_err(|_| "Invalid settings string")?;
         let handle = unsafe { ffi::wgTurnOn(c_settings.as_ptr(), tun_fd as c_int) };
         if handle < 0 {
             Err("Failed to turn on wireguard interface".to_string())
         } else {
+            // default to enable interference detection
+            unsafe { ffi::wgEnableInterferenceDetection(handle as c_int, true) };
             Ok(handle)
         }
     }
@@ -147,6 +155,7 @@ impl WireGuardApi {
 
     /// 更新配置
     pub fn set_config(handle: i32, settings: &str) -> Result<(), i64> {
+        debug!("The config is : {}", settings);
         let c_settings = CString::new(settings).map_err(|_| -1i64)?;
         let ret = unsafe { ffi::wgSetConfig(handle as c_int, c_settings.as_ptr()) };
         if ret == 0 {
@@ -213,6 +222,13 @@ impl WireGuardApi {
             //debug!("WireGuard Config is: {:?}", Self::get_config(handle));
         }
         Ok((rx, tx))
+    }
+
+    /// Get wg config
+    pub fn get_wg_config(handle: i32) {
+        unsafe {
+            debug!("WireGuard Config is: {:?}", Self::get_config(handle));
+        }
     }
 }
 
@@ -291,19 +307,37 @@ mod tests {
         let h2 = 44;
         let h3 = 55;
         let h4 = 66;
-        let settings = format!(
-                "private_key={}\nlisten_port={}\njc={}\njmin={}\njmax={}\ns1={}\ns2={}\nh1={}\nh2={}\nh3={}\nh4={}\nreplace_peers=true\npublic_key={}\npreshared_key={}\nendpoint={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\n",
-                private_key,
-                listen_port,
-                jc,
-                jmin,
-                jmax,
-                s1,s2,
-                h1,h2,h3,h4,
-                public_key,
-                preshared_key,
-                endpoint
-            );
+        let settings = "private_key=+Bd4l7kpiveFJhF0Tu/Mbg6MocKqUdtj7eUAS3BuDls=
+listen_port=51820
+jc=3
+jmin=10
+jmax=30
+s1=11
+s2=22
+h1=33
+h2=44
+h3=55
+h4=66
+public_key=qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=
+preshared_key=rG7z8Z/gkk8wWUA1KwkQ/TS/wFGVBTAEA69igjUhr9Q=
+allowed_ip=0.0.0.0/1
+allowed_ip=128.0.0.0/2
+allowed_ip=192.0.0.0/9
+allowed_ip=192.128.0.0/11
+allowed_ip=192.160.0.0/13
+allowed_ip=192.169.0.0/16
+allowed_ip=192.170.0.0/15
+allowed_ip=192.172.0.0/14
+allowed_ip=192.176.0.0/12
+allowed_ip=192.192.0.0/10
+allowed_ip=193.0.0.0/8
+allowed_ip=194.0.0.0/7
+allowed_ip=196.0.0.0/6
+allowed_ip=200.0.0.0/5
+allowed_ip=208.0.0.0/4
+allowed_ip=224.0.0.0/3
+endpoint=52.78.213.238:62951
+";
         println!("Wireguard conf: {}", settings);
         match WireGuardApi::turn_on(&settings, tun_fd) {
             Ok(handle) => {

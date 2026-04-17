@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
     Bars4Icon,
-    Cog6ToothIcon,
+    //Cog6ToothIcon,
     CursorArrowRippleIcon,
     CreditCardIcon
 } from "@heroicons/vue/24/outline";

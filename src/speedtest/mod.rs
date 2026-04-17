@@ -319,10 +319,7 @@ pub async fn run_speed_test() -> Vec<SpeedTestResult> {
 
     #[cfg(target_os = "macos")]
     if let Some(info) = &phys_info {
-        debug!(
-            "Adding temporary bypass routes for speedtest via {}",
-            info.name
-        );
+        //debug!("Adding temporary bypass routes for speedtest via {}",info.name);
         manage_bypass_routes(&servers, info, true);
     }
 

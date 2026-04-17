@@ -39,11 +39,11 @@ pub struct SubscriptionPlan {
     pub cta: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ApiClient {
     client: Client,
     base_url: String,
-    pub token: Mutex<Option<String>>,
+    pub token: std::sync::Arc<Mutex<Option<String>>>,
 }
 
 impl ApiClient {
@@ -57,7 +57,7 @@ impl ApiClient {
         Self {
             client,
             base_url: "https://iedux.pro/wgx".to_string(),
-            token: Mutex::new(None),
+            token: std::sync::Arc::new(Mutex::new(None)),
         }
     }
 

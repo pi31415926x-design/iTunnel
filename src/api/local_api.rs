@@ -1,9 +1,11 @@
 use crate::api::remote_api::{SubscribeRequest, SubscriptionPlan};
 use crate::speedtest;
 use crate::wg::config::{ConnectionStatus, WgConfigPayload, WireGuardState};
+use crate::wg::WireGuardApi;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -37,17 +39,16 @@ pub async fn get_logs() -> impl Responder {
 
 #[get("/api/user_info")]
 pub async fn user_info_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let device_id = match crate::config::machine_id::get_machine_id() {
-        Ok(id) => id,
-        Err(e) => return HttpResponse::InternalServerError().body(e),
+    let (api_client, device_id) = {
+        let state_lock = state.lock().unwrap();
+        (state_lock.api_client.clone(), state_lock.device_id.clone())
     };
 
-    let state_lock = state.lock().unwrap();
     // Re-verify to get the latest expiration from the token/claims
-    match state_lock.api_client.verify_device(&device_id).await {
+    match api_client.verify_device(&device_id).await {
         Ok(_) => {
             // After verify_device, the token is updated. We can parse it to get exp.
-            let token_opt = state_lock.api_client.token.lock().unwrap().clone();
+            let token_opt = api_client.token.lock().unwrap().clone();
             if let Some(token) = token_opt {
                 if let Ok(claims) = crate::api::jwt::parse_jwt(&token) {
                     let expire_date = chrono::DateTime::from_timestamp(claims.exp, 0)
@@ -174,72 +175,82 @@ pub async fn switch_node_handler(
 ) -> impl Responder {
     info!("🔄 Switching to node IP: {}", req.ip);
 
-    let mut state = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
+    // 1. Update the state with the new endpoint
+    let handle_res = {
+        let mut state_lock = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock state: {}", e);
+                return HttpResponse::InternalServerError().body("Internal Server Error");
+            }
+        };
+
+        if let Some(wg_config) = state_lock.wg_config.as_mut() {
+            let port = rand::thread_rng().gen_range(61820..=63820);
+            info!("Generated random port: {}", port);
+            wg_config.peers[0].endpoint = format!("{}:{}", req.ip, port);
         }
+
+        let new_config = state_lock.json_to_wg_config(state_lock.wg_config.as_ref().unwrap());
+        let handle = state_lock.handle.unwrap();
+
+        crate::wg::WireGuardApi::set_config(handle, &new_config)
     };
 
-    // 1. Update the state with the new endpoint
-    if let Err(e) = state.update_endpoint(&req.ip) {
-        error!("Failed to update endpoint: {}", e);
-        return HttpResponse::InternalServerError().body(e);
-    }
-
-    // 2. Apply the updated config (which will handle stopping the old session)
-    // TODO: should be use set_config
-    //
-    let old_config = state.config.clone().unwrap();
-    info!("the old config is : {}", old_config);
-    info!("to update new endpoint ip:{}", &req.ip);
-    let new_config = replace_endpoint_ip(&old_config, &req.ip);
-    info!("the new config is : {}", new_config);
-    match crate::wg::WireGuardApi::set_config(state.handle.unwrap(), &new_config) {
+    match handle_res {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "status": "success", "ip": req.ip })),
         Err(e) => {
             error!("Failed to apply config during switch: {}", e);
             HttpResponse::InternalServerError().body("Failed to apply config during switch")
         }
     }
-    /*
-        match crate::wg::config::apply_wg_config(&mut state) {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "status": "success", "ip": req.ip })),
-        Err(e) => {
-            error!("Failed to apply config during switch: {}", e);
-            HttpResponse::InternalServerError().body(e)
-        }
-    }
-     */
 }
 
 #[post("/api/connect")]
 pub async fn connect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    info!("🚀 Connection request received from Overview");
-    let mut state_lock = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
+    // try to get config from remote
+    let (api_client, device_id, is_connected) = {
+        let state_lock = state.lock().unwrap();
+        (
+            state_lock.api_client.clone(),
+            state_lock.device_id.clone(),
+            state_lock.status == crate::wg::config::ConnectionStatus::Connected,
+        )
     };
 
-    if state_lock.status == crate::wg::config::ConnectionStatus::Connected {
+    if is_connected {
         return HttpResponse::Ok().json(serde_json::json!({ "status": "already_connected" }));
     }
 
-    // try to get config from remote
-    let config = state_lock
-        .api_client
-        .get_desktop_cfg(&state_lock.device_id)
-        .await;
+    let config = api_client.get_desktop_cfg(&device_id).await;
 
     match config {
         Ok(cfg) => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&cfg) {
                 if let Some(encrypted) = json["wgcfgparam"].as_str() {
-                    let decoded_str = crate::wg::WireGuardApi::decode_config(encrypted);
+                    let mut decoded_str = crate::wg::WireGuardApi::decode_config(encrypted);
+                    info!("Decoded config: {}", decoded_str);
+                    decoded_str = "[Interface]
+PrivateKey = +Bd4l7kpiveFJhF0Tu/Mbg6MocKqUdtj7eUAS3BuDls=
+ListenPort = 51820
+Jc = 3
+Jmin = 10
+Jmax = 30
+S1 = 11
+S2 = 22
+H1 = 33
+H2 = 44
+H3 = 55
+H4 = 66
+Address = 10.88.0.96/16
+DNS = 8.8.8.8, 8.8.4.4
+MTU = 1280
+[Peer]
+PublicKey = qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=
+PresharedKey = rG7z8Z/gkk8wWUA1KwkQ/TS/wFGVBTAEA69igjUhr9Q=
+AllowedIPs = 0.0.0.0/1, 128.0.0.0/2, 192.0.0.0/9, 192.128.0.0/11, 192.160.0.0/13, 192.169.0.0/16, 192.170.0.0/15, 192.172.0.0/14, 192.176.0.0/12, 192.192.0.0/10, 193.0.0.0/8, 194.0.0.0/7, 196.0.0.0/6, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3
+Endpoint = 52.78.213.238:63685".to_string();
+                    let mut state_lock = state.lock().unwrap();
                     state_lock.config = Some(decoded_str);
                     match crate::wg::config::apply_wg_config(&mut *state_lock) {
                         Ok(_) => {
@@ -257,9 +268,6 @@ pub async fn connect_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Re
             }
         }
         Err(e) => {
-            // TODO: 频繁出现:
-            // Failed to get config from remote: Request failed:
-            // error sending request for url (https://iedux.pro/wgx/api/get_desktop_cfg)
             error!("Failed to get config from remote: {}", e);
             return HttpResponse::InternalServerError().body("Failed to get config from remote");
         }
@@ -509,17 +517,18 @@ pub async fn subscribe_req_handler(
     req: web::Json<SubscribeRequest>,
     state: web::Data<Mutex<WireGuardState>>,
 ) -> impl Responder {
-    debug!("🔔 Received Local Subscription Request: {:?}", req);
-
-    let state_lock = match state.lock() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to lock state: {}", e);
-            return HttpResponse::InternalServerError().body("Internal Server Error");
-        }
+    let api_client = {
+        let state_lock = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock state: {}", e);
+                return HttpResponse::InternalServerError().body("Internal Server Error");
+            }
+        };
+        state_lock.api_client.clone()
     };
 
-    match state_lock.api_client.subscribe_req(&req).await {
+    match api_client.subscribe_req(&req).await {
         Ok(resp) => {
             info!("✅ Subscription Request Forwarded Successfully: {}", resp);
             HttpResponse::Ok().body(resp)
@@ -529,4 +538,30 @@ pub async fn subscribe_req_handler(
             HttpResponse::InternalServerError().body(e.to_string())
         }
     }
+}
+
+#[get("/api/get_wg_config")]
+pub async fn get_wg_config(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
+    let (handle, status) = match state.lock() {
+        Ok(s) => (s.handle, s.status),
+        Err(e) => {
+            error!("Failed to lock state: {}", e);
+            return HttpResponse::InternalServerError().body("Internal Server Error");
+        }
+    };
+
+    if let Some(h) = handle {
+        if let Some(config) = WireGuardApi::get_config(h) {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "status": status,
+                "config": config
+            }));
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": status,
+        "config": null,
+        "message": "VPN not connected or config unavailable"
+    }))
 }

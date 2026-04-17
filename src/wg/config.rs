@@ -44,6 +44,7 @@ pub struct WireGuardState {
     pub gateway_enabled: bool,
     pub original_gateway: Option<String>,
     pub active_endpoint: Option<String>,
+    pub wg_config: Option<Wg>,
 }
 
 impl WireGuardState {
@@ -160,26 +161,60 @@ impl WireGuardState {
     /// 可以用来直接给libwg-go使用
     pub fn json_to_wg_config(&self, w: &Wg) -> String {
         let mut s = format!(
-            "private_key={}\nlisten_port={}\n",
-            w.interface.private_key, w.interface.listen_port
+            "private_key={}
+listen_port={}
+jc=3
+jmin=10
+jmax=30
+s1=11
+s2=22
+h1=33
+h2=44
+h3=55
+h4=66
+i1=<b 0x16feff0000000000000001004c01><t><r 28><r 150>
+replace_peers=true
+",
+            Self::base64_to_hex(&w.interface.private_key).unwrap(),
+            w.interface.listen_port
         );
 
         // TODO: endpoint with port
         // TODO: multiple peers case
         // TODO: multiple allowed_ips case
         for p in &w.peers {
-            s += &format!("public_key={}\n", p.public_key);
+            s += &format!(
+                "public_key={}\n",
+                Self::base64_to_hex(&p.public_key).unwrap()
+            );
             if !p.preshared_key.is_empty() {
-                s += &format!("preshared_key={}\n", p.preshared_key);
+                s += &format!(
+                    "preshared_key={}\n",
+                    Self::base64_to_hex(&p.preshared_key).unwrap()
+                );
             }
             for ip in &p.allowed_ips {
-                s += &format!("allowed_ips={}\n", ip);
+                s += &format!("allowed_ip={}\n", ip);
             }
             if !p.endpoint.is_empty() {
-                s += &format!("endpoint={}\n", p.endpoint);
+                //s += &format!("endpoint={}\n", p.endpoint);
+                // TODO don't support IPv6
+                //s += &format!("endpoint={}\n", "13.231.209.151:52839");2406:da14:2ea:4600:88b9:3372:8c5b:68ce
+                s += &format!(
+                    "endpoint={}\n",
+                    "[2406:da14:2ea:4600:88b9:3372:8c5b:68ce]:52839"
+                );
             }
         }
         s
+    }
+
+    pub fn base64_to_hex(base64_key: &str) -> Result<String, String> {
+        use base64::{engine::general_purpose, Engine as _};
+        let bytes = general_purpose::STANDARD
+            .decode(base64_key)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
     }
 }
 
@@ -216,7 +251,8 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
     state.status = ConnectionStatus::Connecting;
     // 1. Ensure TUN device exists
     if state.tun_fd.is_none() {
-        match crate::wg::WireGuardApi::create_tun("utun9981", 1420) {
+        crate::wg::WireGuardApi::set_logger();
+        match crate::wg::WireGuardApi::create_tun("utun9981", 1280) {
             Ok(fd) => {
                 info!("TUN device created successfully. FD: {}", fd);
                 state.tun_fd = Some(fd);
@@ -228,19 +264,19 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
         }
     }
 
-    // 2. Handle wireguard config to turn on wg
-    info!("WireGuard config: {}", config);
+    // 2. Convert config string to JSON
+    let _wg = state.wg_config_to_json(&config);
+    let tun_ip = &_wg.interface.address;
 
-    let ip = "";
-
+    // 3. Convert JSON to config string
+    let config = state.json_to_wg_config(&_wg);
     if let Some(fd) = state.tun_fd {
-        info!("Turning on WireGuard with FD: {}", fd);
         match crate::wg::WireGuardApi::turn_on(&config, fd) {
             Ok(handle) => {
                 info!("WireGuard turned on successfully. Handle: {}", handle);
                 state.handle = Some(handle);
 
-                // 3. Configure Network (IP and Routes)
+                // 4. Configure Network (IP and Routes)
                 // Extract endpoint IP (handling IPv4 and IPv6 with optional port)
                 let endpoint = config
                     .lines()
@@ -286,31 +322,17 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
                     gateway_ip, endpoint_ip
                 );
 
-                if let Err(e) = configure_network("utun9981", &ip, &gateway_ip, endpoint_ip) {
-                    error!("Failed to configure network: {}, config param addr:{}, gateway :{}, endpoint: {}", e, &ip, &gateway_ip, endpoint_ip);
+                if let Err(e) = configure_network("utun9981", &tun_ip, &gateway_ip, endpoint_ip) {
+                    error!("Failed to configure network: {}, config param addr:{}, gateway :{}, endpoint: {}", 
+                    e, &tun_ip, &gateway_ip, endpoint_ip);
                     state.status = ConnectionStatus::Error;
                 } else {
                     state.status = ConnectionStatus::Connected;
                     state.active_endpoint = Some(endpoint_ip.to_string());
 
-                    // 4. Persist config for future use
-                    if let Some(payload) = &state.payload {
-                        match serde_json::to_string(payload) {
-                            Ok(json_str) => {
-                                if let Err(e) = crate::wg::store::save_config(&json_str) {
-                                    error!("Failed to persist config: {}", e);
-                                } else {
-                                    info!("✅ Config persisted successfully.");
-                                }
-                            }
-                            Err(e) => error!("Failed to serialize payload: {}", e),
-                        }
-                    } else {
-                        error!("Don't save wg config to use in future");
-                    }
+                    //TODO: 4. Persist config for future use
+                    state.wg_config = Some(_wg);
                 }
-                // TODO: this is only tmp info
-                error!("this config will be saved: {}", config);
                 Ok(handle)
             }
             Err(e) => {
@@ -486,19 +508,19 @@ fn get_gateway_for_ip(target: &str) -> std::io::Result<String> {
 
 fn configure_network(
     interface_name: &str,
-    ip: &str,
+    tun_ip: &str,
     gateway: &str,
     endpoint_ip: &str,
 ) -> std::io::Result<()> {
     info!("Configuring network for interface: {}", interface_name);
 
-    let skip_base = ip == "SKIP";
+    let skip_base = tun_ip == "SKIP";
 
     #[cfg(target_os = "macos")]
     {
         if !skip_base {
             // Parse IPs (could be comma separated)
-            for addr in ip.split(',') {
+            for addr in tun_ip.split(',') {
                 let addr = addr.trim();
                 if addr.is_empty() {
                     continue;
@@ -897,13 +919,20 @@ mod tests {
 
         let config = state.json_to_wg_config(&wg);
 
-        println!("test_json_to_wg_config is : {:#?}", config);
-        assert!(config.contains("private_key = private_key_123"));
-        assert!(config.contains("listen_port = 51820"));
+        println!("test_json_to_wg_config is : {}", config);
+        assert!(config.contains("private_key=private_key_123"));
+        assert!(config.contains("listen_port=51820"));
         assert!(config.contains("public_key=public_key_abc"));
         assert!(config.contains("preshared_key=preshared_key_def"));
         assert!(config.contains("allowed_ips=0.0.0.0/0"));
         assert!(config.contains("allowed_ips=::/0"));
         assert!(config.contains("endpoint=1.2.3.4:51820"));
+    }
+    #[test]
+    fn test_base64_to_hex() {
+        let b64 = "yMlj3LbVKMW69kXXh0OpbfZUlEVmkYDao3bk6jTl/EQ=";
+        let expected_hex = "c8c963dcb6d528c5baf645d78743a96df6549445669180daa376e4ea34e5fc44";
+        let result = WireGuardState::base64_to_hex(b64).unwrap();
+        assert_eq!(result, expected_hex);
     }
 }

@@ -45,6 +45,7 @@ async fn start_actix_server(
             .service(local_api::disconnect_handler)
             .service(local_api::switch_node_handler)
             .service(local_api::subscribe_req_handler)
+            .service(local_api::get_wg_config)
             .service(Files::new("/", static_path.as_ref()).index_file("index.html"))
     })
     .bind(("127.0.0.1", 8181))?
@@ -332,3 +333,7 @@ fn main() {
             _ => {}
         });
 }
+
+// TODO
+// 1. 直接选择节点连接会挂
+// 2. 切换节点时, 节点ip不能设置默认官网
