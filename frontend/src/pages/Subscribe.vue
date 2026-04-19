@@ -14,11 +14,11 @@ const plans = ref<any[]>([]);
 
 onMounted(async () => {
   try {
-    const res = await fetch('/api/device_id');
+    const res = await fetch('/api/user_info');
     const data = await res.json();
     deviceId.value = data.device_id;
   } catch (err) {
-    console.error('Failed to fetch device ID:', err);
+    console.error('Failed to fetch user info:', err);
   }
 
   try {

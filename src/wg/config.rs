@@ -1,4 +1,4 @@
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::default::Default;
 
@@ -11,7 +11,92 @@ pub enum ConnectionStatus {
     Error,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+// ========== Client/Server Mode ==========
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppMode {
+    #[serde(rename = "client")]
+    Client,
+    #[serde(rename = "server")]
+    Server,
+}
+
+impl Default for AppMode {
+    fn default() -> Self {
+        AppMode::Client
+    }
+}
+
+// ========== WireGuard Enhancement Modes ==========
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    #[serde(rename = "udp")]
+    UDP,
+    #[serde(rename = "tcp")]
+    TCP,
+}
+
+impl Default for Protocol {
+    fn default() -> Self {
+        Protocol::UDP
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    #[serde(rename = "split")]
+    Split, // 分流模式（默认）
+    #[serde(rename = "global")]
+    Global, // 全局代理模式
+}
+
+impl Default for ProxyMode {
+    fn default() -> Self {
+        ProxyMode::Split
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EnhanceMode {
+    pub protocol: Protocol,            // TCP/UDP
+    pub obfuscate: bool,               // 随机混淆
+    pub proxy_mode: ProxyMode,         // 全局/分流
+    pub obfuscate_key: Option<String>, // 混淆密钥（可选）
+}
+
+impl Default for EnhanceMode {
+    fn default() -> Self {
+        EnhanceMode {
+            protocol: Protocol::UDP,
+            obfuscate: false,
+            proxy_mode: ProxyMode::Split,
+            obfuscate_key: None,
+        }
+    }
+}
+
+// ========== Endpoint Management ==========
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EndpointInfo {
+    pub id: String,               // 唯一标识
+    pub name: String,             // 节点名称
+    pub address: String,          // IP地址或域名
+    pub port: u16,                // 端口
+    pub location: Option<String>, // 地理位置
+    pub latency: Option<u32>,     // 延迟（毫秒）
+    pub from_subscription: bool,  // 是否来自订阅
+    pub wg_config: Option<Wg>,    // 详细配置
+}
+
+impl EndpointInfo {
+    pub fn to_string(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Interface {
     pub private_key: String,
     pub listen_port: u16,
@@ -19,14 +104,17 @@ pub struct Interface {
     pub dns: Vec<String>,
     pub mtu: u16,
 }
-#[derive(Serialize, Deserialize, Default, Debug)]
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Peer {
     pub public_key: String,
     pub preshared_key: String,
     pub allowed_ips: Vec<String>,
     pub endpoint: String,
+    pub persistent_keepalive: Option<u16>,
 }
-#[derive(Serialize, Deserialize, Default, Debug)]
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Wg {
     pub interface: Interface,
     pub peers: Vec<Peer>,
@@ -34,6 +122,7 @@ pub struct Wg {
 
 #[derive(Debug, Default)]
 pub struct WireGuardState {
+    // ========== Base Fields ==========
     pub device_id: String,
     pub tun_fd: Option<i32>,
     pub handle: Option<i32>,
@@ -42,9 +131,16 @@ pub struct WireGuardState {
     pub status: ConnectionStatus,
     pub api_client: crate::api::remote_api::ApiClient,
     pub gateway_enabled: bool,
-    pub original_gateway: Option<String>,
+    pub original_gateway_v4: Option<String>,
+    pub original_gateway_v6: Option<String>,
     pub active_endpoint: Option<String>,
     pub wg_config: Option<Wg>,
+
+    // ========== New Fields for Client/Server Mode ==========
+    pub app_mode: AppMode,                      // Client or Server
+    pub enhance_mode: EnhanceMode,              // TCP/Obfuscate/ProxyMode
+    pub available_endpoints: Vec<EndpointInfo>, // Available endpoints (from subscription)
+    pub selected_endpoint_id: Option<String>,   // Currently selected endpoint
 }
 
 impl WireGuardState {
@@ -197,13 +293,7 @@ replace_peers=true
                 s += &format!("allowed_ip={}\n", ip);
             }
             if !p.endpoint.is_empty() {
-                //s += &format!("endpoint={}\n", p.endpoint);
-                // TODO don't support IPv6
-                //s += &format!("endpoint={}\n", "13.231.209.151:52839");2406:da14:2ea:4600:88b9:3372:8c5b:68ce
-                s += &format!(
-                    "endpoint={}\n",
-                    "[2406:da14:2ea:4600:88b9:3372:8c5b:68ce]:52839"
-                );
+                s += &format!("endpoint={}\n", p.endpoint);
             }
         }
         s
@@ -246,9 +336,17 @@ pub struct WgConfigPayload {
 }
 
 pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
-    // 0. Initial preparation of config string
-    let config = state.config.clone().unwrap_or_default();
     state.status = ConnectionStatus::Connecting;
+
+    // 0. Initial preparation of config
+    let _wg = if let Some(wg) = state.wg_config.clone() {
+        info!("Using pre-populated WireGuard config");
+        wg
+    } else {
+        let config = state.config.clone().unwrap_or_default();
+        state.wg_config_to_json(&config)
+    };
+
     // 1. Ensure TUN device exists
     if state.tun_fd.is_none() {
         crate::wg::WireGuardApi::set_logger();
@@ -264,8 +362,6 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
         }
     }
 
-    // 2. Convert config string to JSON
-    let _wg = state.wg_config_to_json(&config);
     let tun_ip = &_wg.interface.address;
 
     // 3. Convert JSON to config string
@@ -301,21 +397,58 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
                     &endpoint
                 };
 
-                // Detect gateway for the endpoint IP
+                // Backup original gateways for both IPv4 and IPv6 regardless of endpoint type
+                // This ensures we can restore the whole network config on dual-stack systems
+                if state.original_gateway_v4.is_none() {
+                    let targets = ["8.8.8.8", "1.1.1.1", ""]; // Empty string means "default"
+                    for target in targets {
+                        match get_gateway_for_ip(target) {
+                            Ok(gw4) => {
+                                state.original_gateway_v4 = Some(gw4.clone());
+                                info!("Backed up original IPv4 gateway: {}", gw4);
+                                break;
+                            }
+                            Err(e) => {
+                                debug!("Failed to backup IPv4 gateway via {}: {}", target, e);
+                            }
+                        }
+                    }
+                    if state.original_gateway_v4.is_none() {
+                        warn!("Could not backup any original IPv4 default gateway!");
+                    }
+                }
+
+                if state.original_gateway_v6.is_none() {
+                    let targets = ["2001:4860:4860::8888", "2606:4700:4700::1111", ""];
+                    for target in targets {
+                        match get_gateway_for_ip(target) {
+                            Ok(gw6) => {
+                                state.original_gateway_v6 = Some(gw6.clone());
+                                info!("Backed up original IPv6 gateway: {}", gw6);
+                                break;
+                            }
+                            Err(e) => {
+                                debug!("Failed to backup IPv6 gateway via {}: {}", target, e);
+                            }
+                        }
+                    }
+                    if state.original_gateway_v6.is_none() {
+                        warn!("Could not backup any original IPv6 default gateway!");
+                    }
+                }
+
+                // Detect gateway for the endpoint IP (used for the host route)
                 let gateway_ip = match get_gateway_for_ip(endpoint_ip) {
                     Ok(ip) => ip,
                     Err(e) => {
                         error!("Failed to detect gateway for {}: {}", endpoint_ip, e);
-                        // Fallback to default gateway
-                        get_gateway_for_ip("").unwrap_or_else(|_| "192.168.1.1".to_string())
+                        // Fallback to the captured IPv4 gateway or a default
+                        state
+                            .original_gateway_v4
+                            .clone()
+                            .unwrap_or_else(|| "192.168.1.1".to_string())
                     }
                 };
-
-                // Backup original gateway if not already set
-                if state.original_gateway.is_none() {
-                    state.original_gateway = Some(gateway_ip.clone());
-                    info!("Backed up original gateway: {}", gateway_ip);
-                }
 
                 info!(
                     "Using gateway: {} for endpoint: {}",
@@ -562,11 +695,13 @@ fn configure_network(
                 }
             }
 
+            // 设置路由
             let routes = vec![
                 ("0.0.0.0/1", interface_name, "-inet", true),
                 ("128.0.0.0/1", interface_name, "-inet", true),
-                // ("10.99.0.0/24", "10.99.0.7", "-inet", false), // via IP
-                // ("10.99.0.7/32", "10.99.0.7", "-inet", false), // via IP
+                //下面两行代码是参照由于 wg-quick 或其他主流 VPN 客户端在 macOS 上的防泄露“最佳实践”。
+                //它们补全了 0.0.0.0/1 留下的死角，确保单播、多播、广播统统进入你的隧道（或者在代理/FakeIP引擎内部安全丢弃），
+                //保证系统的流量是 100% 被截获的。
                 ("224.0.0.0/4", interface_name, "-inet", true), // -interface
                 ("255.255.255.255", interface_name, "-inet", true), // -interface (no CIDR)
                 ("::/1", interface_name, "-inet6", true),
@@ -602,7 +737,7 @@ fn configure_network(
                 }
             }
         }
-
+        // 让endpoint避免走VPN
         // Add specific route for the endpoint to go through the physical gateway
         if !endpoint_ip.is_empty() {
             let is_v6 = endpoint_ip.contains(':');
@@ -747,35 +882,15 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
         interface_name
     );
 
-    let mut endpoint_ip = "";
-    if let Some(payload) = &state.payload {
-        let endpoint = payload.peers.endpoint.as_str();
-        endpoint_ip = if let Some(last_colon) = endpoint.rfind(':') {
-            let port_str = &endpoint[last_colon + 1..];
-            if port_str.parse::<u16>().is_ok() {
-                let host = &endpoint[..last_colon];
-                if host.starts_with('[') && host.ends_with(']') {
-                    &host[1..host.len() - 1]
-                } else {
-                    host
-                }
-            } else {
-                endpoint
-            }
-        } else {
-            endpoint
-        };
-    }
+    let endpoint_ip_str = state.active_endpoint.clone().unwrap_or_default();
+    let endpoint_ip = endpoint_ip_str.as_str();
 
     #[cfg(target_os = "macos")]
     {
         let routes = vec![
             ("0.0.0.0/1", "-inet"),
             ("128.0.0.0/1", "-inet"),
-            ("default", "-inet"),
-            ("0.0.0.0/0", "-inet"),
             ("10.99.0.0/24", "-inet"),
-            //("10.99.0.7/32", "-inet"), // TODO don't use hardcode IP
             ("224.0.0.0/4", "-inet"),
             ("255.255.255.255", "-inet"),
             ("::/1", "-inet6"),
@@ -796,30 +911,8 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
             let _ = cmd.output();
         }
 
-        // Restore original default route if available
-        if let Some(gw) = &state.original_gateway {
-            info!("Restoring original default route via {}", gw);
-            let mut cmd = std::process::Command::new("route");
-            cmd.arg("-n").arg("add").arg("-inet").arg("default");
-
-            // If gateway is an interface name (doesn't look like an IP), we need the -interface flag
-            if !gw.contains('.') && !gw.contains(':') {
-                cmd.arg("-interface");
-            }
-            cmd.arg(gw);
-
-            let output = cmd.output()?;
-            if !output.status.success() {
-                error!(
-                    "Failed to restore default route: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            } else {
-                info!("Successfully restored default route.");
-            }
-
-            state.original_gateway = None;
-        }
+        state.original_gateway_v4 = None;
+        state.original_gateway_v6 = None;
 
         if !endpoint_ip.is_empty() {
             let is_v6 = endpoint_ip.contains(':');
@@ -914,6 +1007,7 @@ mod tests {
                 preshared_key: "preshared_key_def".into(),
                 allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
                 endpoint: "1.2.3.4:51820".into(),
+                persistent_keepalive: Some(25),
             }],
         };
 

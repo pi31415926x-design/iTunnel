@@ -15,28 +15,11 @@
             <div :class="[
               'w-16 h-16 lg:w-20 lg:h-20 rounded-2xl flex items-center justify-center transition-all duration-700 shadow-inner shrink-0',
               connectionStatus === 'Connected' ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-500 shadow-emerald-200/50' :
-                connectionStatus === 'Connecting' ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-500 animate-pulse transition-all' :
+                connectionStatus === 'Connecting' ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-500 transition-all' :
                   'bg-slate-50 dark:bg-slate-800/50 text-slate-300 dark:text-slate-600'
             ]">
-              <svg v-if="connectionStatus === 'Connected'" xmlns="http://www.w3.org/2000/svg" width="32" height="32"
-                viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
-                stroke-linejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
-                <path d="m9 12 2 2 4-4" />
-              </svg>
-              <svg v-else-if="connectionStatus === 'Connecting'" xmlns="http://www.w3.org/2000/svg" width="32"
-                height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 3v3" />
-                <path d="M12 18v3" />
-                <path d="m4.9 4.9 2.1 2.1" />
-                <path d="m17 17 2.1 2.1" />
-                <path d="M3 12h3" />
-                <path d="M18 12h3" />
-                <path d="m4.9 19.1 2.1-2.1" />
-                <path d="m17 7 2.1-2.1" />
-              </svg>
-              <component :is="LockClosedIcon" class="h-8 w-8 shrink-0" />
+              <component :is="connectionStatus === 'Connected' ? ShieldCheckIcon : connectionStatus === 'Connecting' ? ArrowPathIcon : ShieldExclamationIcon" 
+                :class="['h-8 w-8 shrink-0', connectionStatus === 'Connecting' ? 'animate-spin' : '']" />
             </div>
             <div class="space-y-1">
               <h3 class="text-[10px] font-bold uppercase tracking-widest text-slate-400">VPN PROTECTION</h3>
@@ -55,7 +38,7 @@
                   'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-500/20'
               ]">
                 {{ connectionStatus === 'Connected' ? 'Disconnect' : 'Connect' }}
-                <component :is="connectionStatus === 'Connected' ? LockClosedIcon : LockOpenIcon"
+                <component :is="connectionStatus === 'Connected' ? PowerIcon : BoltIcon"
                   class="h-4 w-4 shrink-0" />
               </button>
             </div>
@@ -65,12 +48,9 @@
           <div class="flex items-center gap-6 lg:border-l lg:border-slate-100 lg:dark:border-slate-800 lg:pl-20">
             <div :class="[
               'w-16 h-16 lg:w-20 lg:h-20 rounded-2xl flex items-center justify-center transition-all duration-700 shrink-0',
-              gatewayEnabled ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-500' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-300 dark:text-slate-600'
+              gatewayEnabled ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-500 shadow-amber-200/30' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-300 dark:text-slate-600'
             ]">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" />
-              </svg>
+              <component :is="ServerIcon" class="h-8 w-8 shrink-0" />
             </div>
             <div class="space-y-1">
               <h3 class="text-[10px] font-bold uppercase tracking-widest text-slate-400">GATEWAY SERVICE</h3>
@@ -114,8 +94,8 @@
       <section class="space-y-6">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
-            <div class="p-2.5 bg-gray-200 text-gray-600 rounded-xl shadow-lg shadow-blue-500/20">
-              <component :is="GlobeAltIcon" class="h-4 w-4 shrink-0" />
+            <div class="p-2.5 bg-blue-500/10 text-blue-500 rounded-xl">
+              <component :is="GlobeAltIcon" class="h-5 w-5 shrink-0" />
             </div>
             <div>
               <h2 class="text-xl font-black tracking-tight">Infrastructure</h2>
@@ -131,11 +111,7 @@
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
               </path>
             </svg>
-            <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1-3-3h7z" />
-            </svg>
+            <component v-else :is="CommandLineIcon" class="h-4 w-4 shrink-0" />
             {{ speedTesting ? 'Testing Network...' : 'Speed Test' }}
           </button>
         </div>
@@ -254,8 +230,13 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import StatCard from "../components/StatCard.vue";
 import {
   GlobeAltIcon,
-  LockOpenIcon,
-  LockClosedIcon
+  ShieldCheckIcon,
+  ShieldExclamationIcon,
+  ArrowPathIcon,
+  ServerIcon,
+  BoltIcon,
+  PowerIcon,
+  CommandLineIcon
 } from "@heroicons/vue/24/outline";
 
 const rx = ref(0);

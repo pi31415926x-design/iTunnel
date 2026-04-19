@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import {
     Bars4Icon,
-    //Cog6ToothIcon,
     CursorArrowRippleIcon,
-    CreditCardIcon
+    CreditCardIcon,
+    GlobeAltIcon,
 } from "@heroicons/vue/24/outline";
-//import { APP_CONFIG } from "../config/app";
-
 
 defineProps<{
     collapsed: boolean;
@@ -17,7 +15,7 @@ defineEmits(["toggle", "close"]);
 
 const items = [
     { name: "Overview", icon: CursorArrowRippleIcon, to: "/" },
-    // { name: "Settings", icon: Cog6ToothIcon, to: "/settings" },
+    { name: "Endpoints", icon: GlobeAltIcon, to: "/endpoints" },
     { name: "Subscription", icon: CreditCardIcon, to: "/subscribe" },
     { name: "Logs", icon: Bars4Icon, to: "/logs" }
 ];

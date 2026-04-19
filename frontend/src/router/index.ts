@@ -5,7 +5,11 @@ export const router = createRouter({
   routes: [
     {
       path: "/",
-      component: () => import("../pages/Overview.vue"),
+      component: () => import("../pages/ClientOverview.vue"),
+    },
+    {
+      path: "/endpoints",
+      component: () => import("../pages/Endpoints.vue"),
     },
     {
       path: "/logs",
@@ -14,10 +18,6 @@ export const router = createRouter({
     {
       path: "/subscribe",
       component: () => import("../pages/Subscribe.vue"),
-    },
-    {
-      path: "/settings",
-      component: () => import("../pages/Settings.vue"),
     },
   ],
 })

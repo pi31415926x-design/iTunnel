@@ -1,10 +1,20 @@
 //我们将代码分为两部分：ffi (原始接口) 和 safe (安全封装)。
 use libc::{c_char, c_int, c_longlong, c_void};
-use log::{debug, set_logger};
+use log::debug;
 use std::ffi::{CStr, CString};
 use std::ptr;
+use std::sync::{Arc, Mutex, OnceLock};
 pub mod config;
 pub mod store;
+
+/// 全局状态实例，允许 FFI 回调更新状态
+static WG_STATE_INSTANCE: OnceLock<Arc<Mutex<config::WireGuardState>>> = OnceLock::new();
+
+pub fn init_wg_state(state: Arc<Mutex<config::WireGuardState>>) {
+    if let Err(_) = WG_STATE_INSTANCE.set(state) {
+        log::warn!("WG_STATE_INSTANCE was already initialized");
+    }
+}
 
 // ============================================================================
 // 1. FFI 模块：对应 Go 导出的函数, 参考来源: api-apple.go
@@ -92,7 +102,24 @@ extern "C" fn rust_logger_trampoline(_ctx: *mut c_void, level: c_int, msg: *cons
         }
     };
 
-    // 接入 log crate
+    // 根据日志内容更新全局状态 (优先于日志记录以减少锁持有时间)
+    if let Some(state_arc) = WG_STATE_INSTANCE.get() {
+        if let Ok(mut state) = state_arc.try_lock() {
+            if message.contains("Received handshake response") {
+                if state.status != config::ConnectionStatus::Connected {
+                    log::info!("Detected handshake response in logs, setting status to CONNECTED");
+                    state.status = config::ConnectionStatus::Connected;
+                }
+            } else if let LogLevel::Error = rust_level {
+                if state.status != config::ConnectionStatus::Error {
+                    log::error!("Detected error in logs, setting status to ERROR: {}", message);
+                    state.status = config::ConnectionStatus::Error;
+                }
+            }
+        }
+    }
+
+    // 最后再输出日志
     match rust_level {
         LogLevel::Verbose => log::debug!("[WG-Go] {}", message),
         LogLevel::Error => log::error!("[WG-Go] {}", message),
@@ -135,9 +162,9 @@ impl WireGuardApi {
 
     /// 开启 WireGuard 隧道
     pub fn turn_on(settings: &str, tun_fd: i32) -> Result<i32, String> {
-        let mut settings = settings.to_string();
-        debug!("wgTurnOn with config: {}", settings);
-        let c_settings = CString::new(settings).map_err(|_| "Invalid settings string")?;
+        let settings_str = settings.to_string();
+        debug!("wgTurnOn with config: {}", settings_str);
+        let c_settings = CString::new(settings_str).map_err(|_| "Invalid settings string")?;
         let handle = unsafe { ffi::wgTurnOn(c_settings.as_ptr(), tun_fd as c_int) };
         if handle < 0 {
             Err("Failed to turn on wireguard interface".to_string())
@@ -307,7 +334,8 @@ mod tests {
         let h2 = 44;
         let h3 = 55;
         let h4 = 66;
-        let settings = "private_key=+Bd4l7kpiveFJhF0Tu/Mbg6MocKqUdtj7eUAS3BuDls=
+        let settings = format!(
+            "private_key={}
 listen_port=51820
 jc=3
 jmin=10
@@ -318,8 +346,8 @@ h1=33
 h2=44
 h3=55
 h4=66
-public_key=qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=
-preshared_key=rG7z8Z/gkk8wWUA1KwkQ/TS/wFGVBTAEA69igjUhr9Q=
+public_key={}
+preshared_key={}
 allowed_ip=0.0.0.0/1
 allowed_ip=128.0.0.0/2
 allowed_ip=192.0.0.0/9
@@ -337,7 +365,9 @@ allowed_ip=200.0.0.0/5
 allowed_ip=208.0.0.0/4
 allowed_ip=224.0.0.0/3
 endpoint=52.78.213.238:62951
-";
+",
+            private_key, public_key, preshared_key
+        );
         println!("Wireguard conf: {}", settings);
         match WireGuardApi::turn_on(&settings, tun_fd) {
             Ok(handle) => {

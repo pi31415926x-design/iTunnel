@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rustc-link-search=native=libs");
     // 链接生成的静态库
     println!("cargo:rustc-link-lib=static=wg-go");
+    println!("cargo:rustc-link-lib=static=fakeip");
 
     // Link required Apple frameworks
     println!("cargo:rustc-link-lib=framework=Security");

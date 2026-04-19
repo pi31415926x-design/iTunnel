@@ -12,6 +12,22 @@ use tauri::{
     Manager,
 };
 use tauri_plugin_opener::OpenerExt;
+
+// ========== Parse CLI Arguments ==========
+fn parse_cli_args() -> itunnel::wg::config::AppMode {
+    let args: Vec<String> = std::env::args().collect();
+    
+    for arg in &args {
+        match arg.as_str() {
+            "-s" | "--server" => return itunnel::wg::config::AppMode::Server,
+            "-c" | "--client" => return itunnel::wg::config::AppMode::Client,
+            _ => {}
+        }
+    }
+    
+    // Default to Client mode
+    itunnel::wg::config::AppMode::Client
+}
 async fn start_actix_server(
     static_dir: PathBuf,
     wg_state: Arc<Mutex<WireGuardState>>,
@@ -46,6 +62,15 @@ async fn start_actix_server(
             .service(local_api::switch_node_handler)
             .service(local_api::subscribe_req_handler)
             .service(local_api::get_wg_config)
+            // ========== New Endpoints for Client Mode ==========
+            .service(local_api::get_mode_handler)
+            .service(local_api::get_endpoints_handler)
+            .service(local_api::select_endpoint_handler)
+            .service(local_api::add_endpoint_handler)
+            .service(local_api::update_endpoint_handler)
+            .service(local_api::delete_endpoint_handler)
+            .service(local_api::save_enhance_mode_handler)
+            .service(local_api::get_enhance_mode_handler)
             .service(Files::new("/", static_path.as_ref()).index_file("index.html"))
     })
     .bind(("127.0.0.1", 8181))?
@@ -58,6 +83,10 @@ async fn start_actix_server(
 fn main() {
     // init logging
     logging::init();
+
+    // ========== Parse CLI Arguments ==========
+    let app_mode = parse_cli_args();
+    info!("📋 Running in mode: {:?}", app_mode);
 
     // Create shared state
     let initial_payload = match itunnel::wg::store::load_config() {
@@ -87,6 +116,12 @@ fn main() {
     // Perform initial device verification in a separate task/thread if we want it to be non-blocking,
     // or just let the first request handle it. For now, let's just initialize.
 
+    // Load saved custom endpoints from disk
+    let saved_endpoints = itunnel::wg::store::load_endpoints().unwrap_or_else(|e| {
+        error!("⚠️ Failed to load custom endpoints: {}", e);
+        vec![]
+    });
+
     let wg_state = Arc::new(Mutex::new(WireGuardState {
         device_id,
         tun_fd: None,
@@ -96,8 +131,15 @@ fn main() {
         api_client,
         gateway_enabled: false,
         active_endpoint: None,
+        app_mode,                           // ========== Set CLI mode ==========
+        enhance_mode: Default::default(),   // Default: UDP, no obfuscate, split mode
+        available_endpoints: saved_endpoints, // Populate with saved endpoints
+        selected_endpoint_id: None,
         ..Default::default()
     }));
+
+    // Initialize global state for logger access
+    itunnel::wg::init_wg_state(wg_state.clone());
 
     // 0. Add signal handler for Ctrl+C (terminal usage)
     let wg_state_sig = wg_state.clone();
@@ -108,17 +150,21 @@ fn main() {
             .unwrap();
         rt.block_on(async {
             if let Ok(_) = tokio::signal::ctrl_c().await {
-                info!("收到 Ctrl+C (SIGINT) 信号，正在执行清理并退出...");
-                let mut state = wg_state_sig.lock().unwrap();
-                let _ = state.stop_and_cleanup();
-                std::process::exit(0);
+                log::info!("收到 Ctrl+C (SIGINT) 信号，正在执行清理并退出...");
+                handle_exit(wg_state_sig);
             }
         });
     });
 
-    let wg_state_run = wg_state.clone();
+    let wg_state_run_window = wg_state.clone();
+    let wg_state_run_exit = wg_state.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                handle_exit(wg_state_run_window.clone());
+            }
+        })
         .setup(move |app| {
             // 获取静态文件目录路径
             let static_dir = if cfg!(dev) {
@@ -266,9 +312,7 @@ fn main() {
                             let _ = app.opener().open_url(url, None::<&str>);
                         }
                         "quit" => {
-                            let mut state = wg_state.lock().unwrap();
-                            let _ = state.stop_and_cleanup();
-                            app.exit(0);
+                            handle_exit(wg_state.clone());
                         }
                         _ => {}
                     }
@@ -326,12 +370,39 @@ fn main() {
         .expect("error while building tauri application")
         .run(move |_app_handle, event| match event {
             tauri::RunEvent::ExitRequested { .. } => {
-                info!("📥 Exit requested, cleaning up...");
-                let mut state = wg_state_run.lock().unwrap();
-                let _ = state.stop_and_cleanup();
+                log::info!("📥 Exit requested, cleaning up...");
+                handle_exit(wg_state_run_exit.clone());
             }
             _ => {}
         });
+}
+
+/// 统一的退出处理函数，确保资源清理
+fn handle_exit(wg_state: std::sync::Arc<std::sync::Mutex<itunnel::wg::config::WireGuardState>>) {
+    // 尝试获取锁，带重试机制以处理正在进行的连接操作
+    let mut state_guard = None;
+    for i in 0..6 {
+        match wg_state.try_lock() {
+            Ok(guard) => {
+                state_guard = Some(guard);
+                break;
+            }
+            Err(_) => {
+                if i < 5 {
+                    log::warn!("正在等待状态锁以执行清理 (尝试 {}/5)...", i + 1);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
+    if let Some(mut state) = state_guard {
+        let _ = state.stop_and_cleanup();
+    } else {
+        log::error!("最终未能获取状态锁，执行强制退出。系统路由可能未能完全恢复！");
+    }
+
+    std::process::exit(0);
 }
 
 // TODO
