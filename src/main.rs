@@ -9,9 +9,10 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    ActivationPolicy,
     Manager,
 };
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(RustEmbed)]
@@ -19,19 +20,72 @@ use tauri_plugin_opener::OpenerExt;
 struct EmbeddedAssets;
 
 // ========== Parse CLI Arguments ==========
-fn parse_cli_args() -> itunnel::wg::config::AppMode {
+struct StartupOptions {
+    app_mode: itunnel::wg::config::AppMode,
+    /// No Tauri window / tray; only Actix on 127.0.0.1:8181 (for servers & automation).
+    headless: bool,
+}
+
+fn parse_startup_options() -> StartupOptions {
     let args: Vec<String> = std::env::args().collect();
-    
+    let mut app_mode = itunnel::wg::config::AppMode::Client;
+    let mut headless = false;
+
     for arg in &args {
         match arg.as_str() {
-            "-s" | "--server" => return itunnel::wg::config::AppMode::Server,
-            "-c" | "--client" => return itunnel::wg::config::AppMode::Client,
+            "-s" | "--server" => app_mode = itunnel::wg::config::AppMode::Server,
+            "-c" | "--client" => app_mode = itunnel::wg::config::AppMode::Client,
+            "--cli" | "--headless" | "-n" => headless = true,
             _ => {}
         }
     }
-    
-    // Default to Client mode
-    itunnel::wg::config::AppMode::Client
+
+    StartupOptions { app_mode, headless }
+}
+
+fn spawn_actix_background(
+    static_dir: PathBuf,
+    wg_state: Arc<Mutex<WireGuardState>>,
+    app_mode: itunnel::wg::config::AppMode,
+) {
+    std::thread::spawn(move || {
+        println!("🌐 正在 127.0.0.1:8181 启动 Web 服务...");
+        match actix_web::rt::System::new().block_on(start_actix_server(
+            static_dir,
+            wg_state,
+            app_mode,
+        )) {
+            Ok(_) => println!("✅ Actix 服务已启动"),
+            Err(e) => {
+                eprintln!("❌ Actix 服务启动失败: {}", e);
+                eprintln!("💡 提示: 请检查端口 8181 是否被占用");
+            }
+        }
+    });
+}
+
+/// Static root for logging / consistency; SPA is still served from [`EmbeddedAssets`].
+fn resolve_static_dir_headless() -> PathBuf {
+    if cfg!(dev) {
+        return std::env::current_dir()
+            .expect("cwd")
+            .join("frontend")
+            .join("dist");
+    }
+    let cwd = std::env::current_dir().expect("cwd");
+    let from_cwd = cwd.join("frontend").join("dist");
+    if from_cwd.exists() {
+        return from_cwd;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let next_to_bin = dir.join("frontend").join("dist");
+            if next_to_bin.exists() {
+                return next_to_bin;
+            }
+        }
+    }
+    from_cwd
 }
 async fn start_actix_server(
     static_dir: PathBuf,
@@ -106,8 +160,11 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
     }
 
     // ========== Parse CLI Arguments ==========
-    let app_mode = parse_cli_args();
+    let StartupOptions { app_mode, headless } = parse_startup_options();
     info!("📋 Running in mode: {:?}", app_mode);
+    if headless {
+        info!("🖥️  Headless (CLI): Tauri UI disabled; API http://127.0.0.1:8181");
+    }
 
     // Create shared state
     let initial_payload = match itunnel::wg::store::load_config() {
@@ -177,6 +234,19 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
         });
     });
 
+    if headless {
+        let static_dir = resolve_static_dir_headless();
+        println!("🚀 iTunnel 启动中 (headless)...");
+        println!("📂 工作目录: {:?}", std::env::current_dir().unwrap());
+        println!("📁 静态文件路径 (参考): {:?}", static_dir);
+        println!("✅ 静态目录存在: {}", static_dir.exists());
+        spawn_actix_background(static_dir, wg_state.clone(), app_mode);
+        println!("✅ 本地 API: http://127.0.0.1:8181 — Ctrl+C 退出");
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let _ = rx.recv();
+        return;
+    }
+
     let wg_state_run_window = wg_state.clone();
     let wg_state_run_exit = wg_state.clone();
     tauri::Builder::default()
@@ -212,19 +282,7 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
             println!("✅ 静态文件目录存在: {}", static_dir.exists());
 
             // 1. 在异步运行时中启动 Actix-web
-            let wg_state_actix = wg_state.clone();
-            std::thread::spawn(move || {
-                println!("🌐 正在 127.0.0.1:8181 启动 Web 服务...");
-                match actix_web::rt::System::new()
-                    .block_on(start_actix_server(static_dir, wg_state_actix, app_mode))
-                {
-                    Ok(_) => println!("✅ Actix 服务已启动"),
-                    Err(e) => {
-                        eprintln!("❌ Actix 服务启动失败: {}", e);
-                        eprintln!("💡 提示: 请检查端口 8181 是否被占用");
-                    }
-                }
-            });
+            spawn_actix_background(static_dir, wg_state.clone(), app_mode);
 
             // 2. 创建托盘菜单项
             let connect_i = MenuItem::with_id(app, "connect", "连接", true, None::<&str>)?;

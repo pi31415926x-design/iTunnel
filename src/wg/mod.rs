@@ -28,7 +28,7 @@ mod ffi {
     // 对应 Go 中的 static void callLogger(...)
     pub type LoggerCallback = extern "C" fn(ctx: *mut c_void, level: c_int, msg: *const c_char);
 
-    #[link(name = "wg-go")] // 假设编译出的库名为 libwg-go.so / libwg-go.a
+    #[link(name = "wg-go")] // libs/: libwg-go.so（Windows: libwg-go.dll）或静态 libwg-go.a
     extern "C" {
         // func wgSetLogger(context, loggerFn uintptr)
         pub fn wgSetLogger(context: *mut c_void, logger_fn: LoggerCallback);
