@@ -10,7 +10,6 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let libs_dir = manifest_dir.join("libs");
     let target = env::var("TARGET").expect("TARGET");
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     // Do not add native=. here: the crate root may still contain an old libwg-go-x86_64.so and the
@@ -41,13 +40,7 @@ fn main() {
         }
     };
 
-    let fakeip = discover_fakeip(&roots, &arch)
-        .unwrap_or_else(|m| {
-            panic!("{m}\nExpected libfakeip.a under the same dirs as wg-go (macOS triple subdir, libs/Linux, or libs/)")
-        });
-    prepare_fakeip(&out_dir, &fakeip);
-
-    // OUT_DIR must come first (and be the only -L for wg-go / fakeip).
+    // OUT_DIR must come first (and be the only -L for wg-go).
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 
     // macOS: Go-built libwg-go often embeds LC_ID_DYLIB as libwg-go-x86_64.so; normalize to @rpath/libwg-go.so
@@ -59,7 +52,6 @@ fn main() {
     }
 
     println!("cargo:rustc-link-lib={wg_link_kind}=wg-go");
-    println!("cargo:rustc-link-lib=static=fakeip");
 
     if os == "macos" {
         println!("cargo:rustc-link-lib=framework=Security");
@@ -93,31 +85,6 @@ fn lib_search_roots(libs_dir: &Path, target_triple: &str, os: &str) -> Vec<PathB
     }
     v.push(libs_dir.to_path_buf());
     v
-}
-
-fn list_files(roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for root in roots {
-        if let Ok(rd) = fs::read_dir(root) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_file() {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    out
-}
-
-fn arch_aliases(rust_arch: &str) -> &'static [&'static str] {
-    match rust_arch {
-        "x86_64" => &["x86_64", "amd64"],
-        "aarch64" => &["aarch64", "arm64"],
-        "arm" => &["arm", "armv7", "armeabi-v7a"],
-        "x86" | "i686" => &["i686", "x86", "i386"],
-        _ => &[],
-    }
 }
 
 enum WgGoArtifact {
@@ -224,48 +191,6 @@ fn fix_macho_wg_go_install_id(path: &Path) {
 fn prepare_wg_go_static(out_dir: &Path, src: &Path) {
     fs::create_dir_all(out_dir).expect("create OUT_DIR");
     let dst = out_dir.join("libwg-go.a");
-    link_or_copy(src, &dst);
-}
-
-fn discover_fakeip(roots: &[PathBuf], arch: &str) -> Result<PathBuf, String> {
-    let files = list_files(roots);
-    let mut candidates: Vec<(u8, PathBuf)> = Vec::new();
-
-    for p in files {
-        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("libfakeip") || !name.ends_with(".a") {
-            continue;
-        }
-        if name == "libfakeip.a" {
-            candidates.push((0, p));
-            continue;
-        }
-        let aliases = arch_aliases(arch);
-        let mut scored = None;
-        for (i, a) in aliases.iter().enumerate() {
-            if name.starts_with(&format!("libfakeip-{a}."))
-                || name.starts_with(&format!("libfakeip_{a}."))
-            {
-                scored = Some((i + 1) as u8);
-                break;
-            }
-        }
-        candidates.push((scored.unwrap_or(100), p));
-    }
-
-    candidates.sort_by_key(|(s, _)| *s);
-    candidates
-        .into_iter()
-        .find(|(s, _)| *s < u8::MAX)
-        .map(|(_, p)| p)
-        .ok_or_else(|| format!("no libfakeip*.a for arch={arch}"))
-}
-
-fn prepare_fakeip(out_dir: &Path, src: &Path) {
-    fs::create_dir_all(out_dir).expect("create OUT_DIR");
-    let dst = out_dir.join("libfakeip.a");
     link_or_copy(src, &dst);
 }
 
