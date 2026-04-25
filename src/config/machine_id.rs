@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
 /// 获取机器唯一标识 (UUID)

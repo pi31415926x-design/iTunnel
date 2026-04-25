@@ -164,11 +164,11 @@ fn get_default_interface() -> std::io::Result<String> {
     Ok("en0".to_string())
 }
 
-fn get_interface_ip(iface: &str) -> std::io::Result<String> {
+fn get_interface_ip(_iface: &str) -> std::io::Result<String> {
     #[cfg(target_os = "macos")]
     {
         let output = Command::new("ipconfig")
-            .args(&["getifaddr", iface])
+            .args(&["getifaddr", _iface])
             .output()?;
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
@@ -188,7 +188,7 @@ fn get_interface_ip(iface: &str) -> std::io::Result<String> {
     {
         let ps_cmd = format!(
             "(Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4).IPAddress",
-            iface
+            _iface
         );
         let output = Command::new("powershell")
             .args(&["-Command", &ps_cmd])

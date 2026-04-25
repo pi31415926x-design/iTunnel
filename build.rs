@@ -8,8 +8,10 @@ fn main() {
     println!("cargo:rustc-link-lib=static=wg-go");
     println!("cargo:rustc-link-lib=static=fakeip");
 
-    // Link required Apple frameworks
-    println!("cargo:rustc-link-lib=framework=Security");
-    println!("cargo:rustc-link-lib=framework=CoreFoundation");
-    println!("cargo:rustc-link-lib=framework=NetworkExtension");
+    // Apple frameworks are only valid when linking for macOS (not Linux/Windows).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=framework=Security");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=NetworkExtension");
+    }
 }
