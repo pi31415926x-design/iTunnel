@@ -25,17 +25,47 @@ export const useWireGuardStore = defineStore('wireguard', () => {
   // ========== Actions ==========
 
   /**
-   * Initialize store: detect current mode from backend
+   * Initialize store: detect current mode from backend.
+   *
+   * In dev, you can short-circuit the backend call by setting
+   * `VITE_FORCE_MODE=server` (or `client`) in the environment, e.g.:
+   *
+   *     VITE_FORCE_MODE=server npm run dev
+   *
+   * or by adding `VITE_FORCE_MODE=server` to `frontend/.env.development.local`.
+   *
+   * If `/api/mode` is unreachable in dev, we keep the default mode and continue
+   * so the UI still renders without a backend.
    */
   async function initialize() {
-    try {
-      if (isInitialized.value) return;
+    if (isInitialized.value) return;
 
+    const forcedMode = import.meta.env.DEV
+      ? (import.meta.env.VITE_FORCE_MODE as AppMode | undefined)
+      : undefined;
+
+    if (forcedMode === 'server' || forcedMode === 'client') {
+      mode.value = forcedMode;
+      isInitialized.value = true;
+      console.log('✅ WireGuard store initialized with forced mode:', mode.value);
+      return;
+    }
+
+    try {
       const detectedMode = await wireguardApi.getMode();
       mode.value = detectedMode;
       isInitialized.value = true;
       console.log('✅ WireGuard store initialized with mode:', mode.value);
     } catch (err) {
+      if (import.meta.env.DEV) {
+        console.warn(
+          '⚠️ /api/mode unreachable, using default mode:',
+          mode.value,
+          '(set VITE_FORCE_MODE to override)'
+        );
+        isInitialized.value = true;
+        return;
+      }
       error.value = `Failed to initialize: ${err}`;
       console.error('❌ Failed to initialize WireGuard store:', err);
       throw err;

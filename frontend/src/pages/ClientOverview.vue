@@ -14,8 +14,8 @@
           class="relative overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-lg shadow-slate-200/50 dark:shadow-none">
           <div class="flex items-center gap-3">
             <div
-              class="w-10 h-10 rounded-xl bg-sky-50 dark:bg-sky-500/10 text-sky-500 flex items-center justify-center shrink-0">
-              <ArrowUpIcon class="h-5 w-5 shrink-0" stroke-width="2.5" />
+              class="w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+              <ArrowUpIcon class="h-5 w-5 shrink-0" />
             </div>
             <div class="flex-1 min-w-0">
               <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Upload</p>
@@ -30,8 +30,8 @@
           class="relative overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-lg shadow-slate-200/50 dark:shadow-none">
           <div class="flex items-center gap-3">
             <div
-              class="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0">
-              <ArrowDownIcon class="h-5 w-5 shrink-0" stroke-width="2.5" />
+              class="w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+              <ArrowDownIcon class="h-5 w-5 shrink-0" />
             </div>
             <div class="flex-1 min-w-0">
               <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Download</p>
@@ -46,8 +46,8 @@
           class="relative overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-lg shadow-slate-200/50 dark:shadow-none">
           <div class="flex items-center gap-3">
             <div
-              class="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-500/10 text-blue-500 flex items-center justify-center shrink-0">
-              <MapPinIcon class="h-5 w-5 shrink-0" stroke-width="2" />
+              class="w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+              <MapPinIcon class="h-5 w-5 shrink-0" />
             </div>
             <div class="flex-1 min-w-0">
               <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-widest">Current Node
@@ -68,8 +68,8 @@
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div
-                class="w-10 h-10 rounded-xl bg-cyan-50 dark:bg-cyan-500/10 text-cyan-500 flex items-center justify-center shrink-0">
-                <AdjustmentsHorizontalIcon class="h-5 w-5 shrink-0" stroke-width="2" />
+                class="w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <AdjustmentsHorizontalIcon class="h-5 w-5 shrink-0" />
               </div>
               <div>
                 <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">Protocol</p>
@@ -77,13 +77,13 @@
               </div>
             </div>
             <button @click="toggleProtocol" :disabled="wireguardStore.isConnected" :class="[
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2',
-              settingsStore.protocol === 'tcp' ? 'bg-cyan-600' : 'bg-slate-200 dark:bg-slate-700',
-              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+              settingsStore.protocol === 'tcp' ? 'bg-red-700' : 'bg-slate-200 dark:bg-slate-700',
+              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : '',
+              'relative inline-flex h-7 w-12 items-center rounded-full transition-colors'
             ]">
               <span :class="[
-                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                settingsStore.protocol === 'tcp' ? 'translate-x-6' : 'translate-x-1'
+                settingsStore.protocol === 'tcp' ? 'translate-x-6 bg-white' : 'translate-x-1 bg-white dark:bg-slate-400',
+                'inline-block h-5 w-5 transform rounded-full transition-transform shadow-sm'
               ]" />
             </button>
           </div>
@@ -101,8 +101,8 @@
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div
-                class="w-10 h-10 rounded-xl bg-purple-50 dark:bg-purple-500/10 text-purple-500 flex items-center justify-center shrink-0">
-                <ArrowsRightLeftIcon class="h-5 w-5 shrink-0" stroke-width="2" />
+                class="w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <ArrowsRightLeftIcon class="h-5 w-5 shrink-0" />
               </div>
               <div>
                 <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">Proxy Mode</p>
@@ -110,13 +110,13 @@
               </div>
             </div>
             <button @click="toggleProxyMode" :disabled="wireguardStore.isConnected" :class="[
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2',
-              settingsStore.proxyMode === 'global' ? 'bg-purple-600' : 'bg-slate-200 dark:bg-slate-700',
-              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+              settingsStore.proxyMode === 'global' ? 'bg-red-700' : 'bg-slate-200 dark:bg-slate-700',
+              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : '',
+              'relative inline-flex h-7 w-12 items-center rounded-full transition-colors'
             ]">
               <span :class="[
-                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                settingsStore.proxyMode === 'global' ? 'translate-x-6' : 'translate-x-1'
+                settingsStore.proxyMode === 'global' ? 'translate-x-6 bg-white' : 'translate-x-1 bg-white dark:bg-slate-400',
+                'inline-block h-5 w-5 transform rounded-full transition-transform shadow-sm'
               ]" />
             </button>
           </div>
@@ -134,10 +134,9 @@
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div :class="[
-                'w-10 h-10 rounded-xl flex items-center justify-center shrink-0',
-                settingsStore.obfuscate ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-500' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-400'
+                'w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0'
               ]">
-                <component :is="settingsStore.obfuscate ? ShieldCheckIcon : ShieldExclamationIcon" class="h-5 w-5 shrink-0" stroke-width="2" />
+                <component :is="settingsStore.obfuscate ? ShieldCheckIcon : ShieldExclamationIcon" class="h-5 w-5 shrink-0" />
               </div>
               <div>
                 <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">Obfuscation</p>
@@ -145,13 +144,13 @@
               </div>
             </div>
             <button @click="toggleObfuscation" :disabled="wireguardStore.isConnected" :class="[
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2',
-              settingsStore.obfuscate ? 'bg-emerald-600' : 'bg-slate-200 dark:bg-slate-700',
-              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+              settingsStore.obfuscate ? 'bg-red-700' : 'bg-slate-200 dark:bg-slate-700',
+              wireguardStore.isConnected ? 'opacity-50 cursor-not-allowed' : '',
+              'relative inline-flex h-7 w-12 items-center rounded-full transition-colors'
             ]">
               <span :class="[
-                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                settingsStore.obfuscate ? 'translate-x-6' : 'translate-x-1'
+                settingsStore.obfuscate ? 'translate-x-6 bg-white' : 'translate-x-1 bg-white dark:bg-slate-400',
+                'inline-block h-5 w-5 transform rounded-full transition-transform shadow-sm'
               ]" />
             </button>
           </div>
@@ -169,10 +168,9 @@
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3">
               <div :class="[
-                'w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-colors',
-                wireguardStore.gatewayEnabled ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-500' : 'bg-slate-50 dark:bg-slate-800/50 text-slate-400'
+                'w-11 h-11 rounded-lg dark:bg-red-500/10 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0'
               ]">
-                <ServerIcon class="h-5 w-5 shrink-0" stroke-width="2" />
+                <ServerIcon class="h-5 w-5 shrink-0" />
               </div>
               <div>
                 <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">LAN Gateway</p>
@@ -180,13 +178,13 @@
               </div>
             </div>
             <button @click="wireguardStore.toggleGateway" :disabled="!wireguardStore.isConnected && !wireguardStore.gatewayEnabled" :class="[
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2',
-              wireguardStore.gatewayEnabled ? 'bg-amber-600' : 'bg-slate-200 dark:bg-slate-700',
-              (!wireguardStore.isConnected && !wireguardStore.gatewayEnabled) ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+              wireguardStore.gatewayEnabled ? 'bg-red-700' : 'bg-slate-200 dark:bg-slate-700',
+              (!wireguardStore.isConnected && !wireguardStore.gatewayEnabled) ? 'opacity-50 cursor-not-allowed' : '',
+              'relative inline-flex h-7 w-12 items-center rounded-full transition-colors'
             ]">
               <span :class="[
-                'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
-                wireguardStore.gatewayEnabled ? 'translate-x-6' : 'translate-x-1'
+                wireguardStore.gatewayEnabled ? 'translate-x-6 bg-white' : 'translate-x-1 bg-white dark:bg-slate-400',
+                'inline-block h-5 w-5 transform rounded-full transition-transform shadow-sm'
               ]" />
             </button>
           </div>
@@ -204,11 +202,9 @@
         class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 lg:p-8 shadow-xl shadow-slate-200/50 dark:shadow-none">
         <div class="text-center space-y-4">
           <button @click="toggleConnection" :disabled="wireguardStore.isConnecting" :class="[
-            'px-8 py-4 rounded-2xl text-lg font-bold transition-all active:scale-95 flex items-center gap-3 mx-auto group',
-            wireguardStore.isConnected ? 'bg-rose-500 text-white hover:bg-rose-600 shadow-lg shadow-rose-500/20' :
-              'bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-500/20'
+            'inline-flex items-center gap-2 px-6 py-3 text-medium font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-sm shadow-red-500/20 transition-all hover:shadow-red-500/40 mx-auto'
           ]">
-            <component :is="wireguardStore.isConnected ? PowerIcon : BoltIcon" class="h-6 w-6 shrink-0" stroke-width="2.5" />
+            <component :is="wireguardStore.isConnected ? PowerIcon : BoltIcon" class="h-6 w-6 shrink-0" />
             {{ wireguardStore.isConnected ? 'Disconnect' : 'Connect' }}
           </button>
 
@@ -238,7 +234,7 @@ import {
   ServerIcon,
   BoltIcon,
   PowerIcon
-} from "@heroicons/vue/24/outline";
+} from "@heroicons/vue/20/solid";
 
 const { wireguardStore, endpointsStore, settingsStore } = useWireGuardMode();
 

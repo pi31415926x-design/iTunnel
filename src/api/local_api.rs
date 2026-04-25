@@ -1,6 +1,6 @@
 use crate::api::remote_api::{SubscribeRequest, SubscriptionPlan};
 use crate::speedtest;
-use crate::wg::config::{ConnectionStatus, Interface, Peer, Wg, WgConfigPayload, WireGuardState};
+use crate::wg::config::{parse_wg_ini, ConnectionStatus, WgConfigPayload, WireGuardState};
 use crate::wg::WireGuardApi;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
@@ -211,7 +211,7 @@ pub async fn switch_node_handler(
     
     // 3. Re-apply networking and wireguard config
     // This adds the new endpoint IP into the primary routing table using the system gateway
-    match crate::wg::config::apply_wg_config(&mut state_lock) {
+    match crate::wg::client::apply_wg_config(&mut state_lock) {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "status": "success", "ip": req.ip })),
         Err(e) => {
             error!("Failed to apply config during switch: {}", e);
@@ -259,7 +259,7 @@ pub async fn connect_handler(
                 state_lock.wg_config = Some(wg_cfg);
                 state_lock.selected_endpoint_id = Some(endpoint_id.clone());
 
-                match crate::wg::config::apply_wg_config(&mut *state_lock) {
+                match crate::wg::client::apply_wg_config(&mut *state_lock) {
                     Ok(_) => {
                         info!("Successfully connected to endpoint: {}", ep.name);
                         HttpResponse::Ok().json(serde_json::json!({
@@ -371,7 +371,7 @@ pub async fn set_wg_config(
         }
     };
 
-    match crate::wg::config::apply_wg_config(&mut state) {
+    match crate::wg::client::apply_wg_config(&mut state) {
         Ok(_) => {
             // Save payload to state
             state.payload = Some(config.into_inner().clone());
@@ -559,6 +559,70 @@ pub async fn subscribe_req_handler(
     }
 }
 
+fn insert_uapi_kv(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: String,
+) {
+    match target.get_mut(key) {
+        None => {
+            target.insert(key.to_string(), serde_json::Value::String(value));
+        }
+        Some(existing) => match existing {
+            serde_json::Value::Array(arr) => arr.push(serde_json::Value::String(value)),
+            _ => {
+                let prev = existing.take();
+                *existing = serde_json::Value::Array(vec![prev, serde_json::Value::String(value)]);
+            }
+        },
+    }
+}
+
+fn parse_uapi_config(raw: &str) -> serde_json::Value {
+    let mut interface = serde_json::Map::new();
+    let mut peers: Vec<serde_json::Value> = Vec::new();
+    let mut current_peer: Option<serde_json::Map<String, serde_json::Value>> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let (k, v) = match trimmed.split_once('=') {
+            Some((k, v)) => (k.trim(), v.trim().to_string()),
+            None => continue,
+        };
+
+        if k == "public_key" {
+            if let Some(peer) = current_peer.take() {
+                peers.push(serde_json::Value::Object(peer));
+            }
+            let mut peer = serde_json::Map::new();
+            insert_uapi_kv(&mut peer, k, v);
+            current_peer = Some(peer);
+            continue;
+        }
+
+        if let Some(peer) = current_peer.as_mut() {
+            insert_uapi_kv(peer, k, v);
+        } else {
+            insert_uapi_kv(&mut interface, k, v);
+        }
+    }
+
+    if let Some(peer) = current_peer.take() {
+        peers.push(serde_json::Value::Object(peer));
+    }
+
+    serde_json::json!({
+        "interface": interface,
+        "peers": peers
+    })
+}
+
+/// Live uapi-style config from libwg-go (`wgGetConfig`). Works in client and
+/// server mode whenever `state.handle` is set.
 #[get("/api/get_wg_config")]
 pub async fn get_wg_config(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
     let (handle, status) = match state.lock() {
@@ -571,9 +635,10 @@ pub async fn get_wg_config(state: web::Data<Mutex<WireGuardState>>) -> impl Resp
 
     if let Some(h) = handle {
         if let Some(config) = WireGuardApi::get_config(h) {
+            let parsed = parse_uapi_config(&config);
             return HttpResponse::Ok().json(serde_json::json!({
                 "status": status,
-                "config": config
+                "config_readable": parsed
             }));
         }
     }
@@ -713,85 +778,6 @@ pub async fn save_enhance_mode_handler(
     }))
 }
 
-fn parse_wg_config(input: &str) -> Wg {
-    let mut interface = Interface::default();
-    let mut peers = Vec::new();
-    let mut current_peer = None::<Peer>;
-    let mut in_interface = false;
-
-    for line in input.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let line_lower = line.to_lowercase();
-        if line_lower == "[interface]" {
-            in_interface = true;
-            if let Some(p) = current_peer.take() {
-                peers.push(p);
-            }
-            continue;
-        }
-
-        if line_lower == "[peer]" {
-            in_interface = false;
-            if let Some(p) = current_peer.take() {
-                peers.push(p);
-            }
-            current_peer = Some(Peer::default());
-            continue;
-        }
-
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_lowercase();
-            let value = value.trim();
-
-            if in_interface {
-                match key.as_str() {
-                    "privatekey" => interface.private_key = value.to_string(),
-                    "address" => interface.address = value.to_string(),
-                    "dns" => {
-                        interface.dns = value.split(',').map(|s| s.trim().to_string()).collect()
-                    }
-                    "mtu" => {
-                        if let Ok(m) = value.parse() {
-                            interface.mtu = m;
-                        }
-                    }
-                    "listenport" => {
-                        if let Ok(p) = value.parse() {
-                            interface.listen_port = p;
-                        }
-                    }
-                    _ => {}
-                }
-            } else if let Some(peer) = current_peer.as_mut() {
-                match key.as_str() {
-                    "publickey" => peer.public_key = value.to_string(),
-                    "presharedkey" => peer.preshared_key = value.to_string(),
-                    "allowedips" => {
-                        peer.allowed_ips = value.split(',').map(|s| s.trim().to_string()).collect()
-                    }
-                    "endpoint" => peer.endpoint = value.to_string(),
-                    "persistentkeepalive" => {
-                        if let Ok(k) = value.parse() {
-                            peer.persistent_keepalive = Some(k);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    if let Some(p) = current_peer {
-        peers.push(p);
-    }
-
-    Wg { interface, peers }
-}
-
 /// GET /api/settings/enhance-mode - 获取当前增强模式设置
 #[get("/api/settings/enhance-mode")]
 pub async fn get_enhance_mode_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
@@ -814,7 +800,7 @@ pub async fn add_endpoint_handler(
     info!("Add endpoint request location: {}", req.node_location);
 
     // Deep parse the configuration
-    let wg_config = parse_wg_config(&req.node_config);
+    let wg_config = parse_wg_ini(&req.node_config);
 
     // Extract address/port from the first peer if available
     let mut address = String::new();
@@ -907,7 +893,7 @@ pub async fn update_endpoint_handler(
         .iter_mut()
         .find(|e| e.id == id)
     {
-        let wg_config = parse_wg_config(&req.node_config);
+        let wg_config = parse_wg_ini(&req.node_config);
 
         let mut address = String::new();
         let mut port = 51820;
@@ -949,4 +935,34 @@ pub async fn update_endpoint_handler(
         HttpResponse::NotFound()
             .json(serde_json::json!({ "success": false, "message": "Endpoint not found" }))
     }
+}
+
+pub fn common_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(get_logs)
+       .service(get_wg_stats)
+       .service(get_wg_config)
+       .service(user_info_handler)
+       .service(get_mode_handler)
+       .service(get_interfaces);
+}
+
+pub fn client_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(set_wg_config)
+       .service(subscribe_plans_handler)
+       .service(speed_test_handler)
+       .service(speed_test_servers_handler)
+       .service(enable_gateway_api)
+       .service(disable_gateway_api)
+       .service(gateway_status_api)
+       .service(connect_handler)
+       .service(disconnect_handler)
+       .service(switch_node_handler)
+       .service(subscribe_req_handler)
+       .service(get_endpoints_handler)
+       .service(select_endpoint_handler)
+       .service(add_endpoint_handler)
+       .service(update_endpoint_handler)
+       .service(delete_endpoint_handler)
+       .service(save_enhance_mode_handler)
+       .service(get_enhance_mode_handler);
 }

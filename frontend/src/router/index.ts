@@ -5,11 +5,15 @@ export const router = createRouter({
   routes: [
     {
       path: "/",
-      component: () => import("../pages/ClientOverview.vue"),
+      component: () => import("../pages/OverviewSwitcher.vue"),
     },
     {
       path: "/endpoints",
       component: () => import("../pages/Endpoints.vue"),
+    },
+    {
+      path: "/peers",
+      component: () => import("../pages/Peers.vue"),
     },
     {
       path: "/logs",

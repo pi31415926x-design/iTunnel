@@ -14,11 +14,11 @@
               v-model="searchQuery"
               type="search"
               placeholder="Search node / IP"
-              class="w-full sm:w-72 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-blue-500 dark:focus:ring-blue-500/20"
+              class="w-full sm:w-72 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-red-500 dark:focus:ring-red-500/20"
             />
             <button
               @click="openAddModal"
-              class="flex items-center justify-center rounded-xl bg-blue-600 p-2 text-white shadow-lg shadow-blue-500/20 transition-all hover:bg-blue-700 active:scale-95 shrink-0"
+              class="inline-flex items-center justify-center rounded-lg bg-red-600 p-2 text-white shadow-sm shadow-red-500/20 transition-all hover:bg-red-700 hover:shadow-red-500/40 active:scale-95 shrink-0"
               title="Add Endpoint"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -41,7 +41,7 @@
         </div>
         <p class="text-lg font-medium">No endpoints found</p>
         <p class="mt-2 text-sm max-w-xs mx-auto text-slate-400">Add your first custom endpoint to start using the tunnel.</p>
-        <button @click="openAddModal" class="mt-6 font-semibold text-blue-600 hover:text-blue-700 transition">Add Endpoint &rarr;</button>
+        <button @click="openAddModal" class="mt-6 font-semibold text-red-600 hover:text-red-700 transition">Add Endpoint &rarr;</button>
       </div>
 
       <!-- Endpoints Grid -->
@@ -52,7 +52,7 @@
           class="flex flex-col rounded-3xl border bg-white dark:bg-slate-900 transition-all duration-300 overflow-hidden relative group"
           :class="[
             endpointsStore.selectedId === endpoint.id 
-              ? 'ring-2 ring-blue-500/50 border-blue-500 shadow-xl shadow-blue-500/10' 
+              ? 'ring-2 ring-red-500/50 border-red-500 shadow-xl shadow-red-500/10' 
               : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 shadow-sm'
           ]"
         >
@@ -72,8 +72,8 @@
                 class="h-9 w-9 flex items-center justify-center rounded-full transition-all active:scale-90"
                 :class="[
                   wireguardStore.isConnected && endpointsStore.selectedId === endpoint.id
-                    ? 'bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white'
-                    : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-600 hover:text-white'
+                    ? 'bg-red-50 text-red-600 hover:bg-red-600 hover:text-white'
+                    : 'bg-red-50 text-red-600 hover:bg-red-600 hover:text-white'
                 ]"
                 :title="wireguardStore.isConnected && endpointsStore.selectedId === endpoint.id ? 'Disconnect' : 'Connect'"
               >
@@ -82,7 +82,7 @@
               </button>
               <button 
                 @click.stop="handleEditEndpoint(endpoint)"
-                class="h-9 w-9 flex items-center justify-center rounded-full bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white transition-all active:scale-90"
+                class="h-9 w-9 flex items-center justify-center rounded-full bg-red-50 text-red-600 hover:bg-red-600 hover:text-white transition-all active:scale-90"
                 title="Edit"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -102,7 +102,7 @@
             <!-- Interface Info -->
             <div class="space-y-3">
               <h4 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5 border-b border-slate-200/50 dark:border-slate-700/50 pb-1">
-                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span> Interface
+                <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span> Interface
               </h4>
               <div class="space-y-2">
                 <div>
@@ -131,7 +131,7 @@
             <!-- Peer Info -->
             <div class="space-y-3">
               <h4 class="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5 border-b border-slate-200/50 dark:border-slate-700/50 pb-1">
-                <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span> Peer
+                <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span> Peer
               </h4>
               <div class="space-y-2">
                 <div>
@@ -148,7 +148,7 @@
                 </div>
                 <div>
                   <label class="text-[10px] text-slate-400 block">Endpoint Port</label>
-                  <p class="font-semibold text-indigo-600 dark:text-indigo-400">{{ endpoint.wg_config?.peers[0]?.endpoint || '—' }}</p>
+                  <p class="font-semibold text-red-600 dark:text-red-400">{{ endpoint.wg_config?.peers[0]?.endpoint || '—' }}</p>
                 </div>
                 <div>
                   <label class="text-[10px] text-slate-400 block">Allowed IPs</label>
@@ -161,7 +161,7 @@
           </div>
           
           <!-- Selected Indicator -->
-          <div v-if="endpointsStore.selectedId === endpoint.id" class="absolute top-2 left-2 flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-white shadow-lg">
+          <div v-if="endpointsStore.selectedId === endpoint.id" class="absolute top-2 left-2 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white shadow-lg">
             <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           </div>
         </div>
@@ -182,7 +182,7 @@
             @mousedown="startResize"
             class="absolute bottom-0 right-0 w-8 h-8 cursor-nwse-resize flex items-end justify-end p-1.5 z-10 group"
           >
-            <svg class="w-4 h-4 text-slate-300 dark:text-slate-700 group-hover:text-blue-500 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+            <svg class="w-4 h-4 text-slate-300 dark:text-slate-700 group-hover:text-red-500 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
               <line x1="22" y1="14" x2="14" y2="22" />
               <line x1="22" y1="18" x2="18" y2="22" />
             </svg>
@@ -205,7 +205,7 @@
                 type="text"
                 placeholder="e.g. USA, JP, HongKong"
                 required
-                class="w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-200 dark:border-slate-700 dark:bg-slate-800 shadow-sm"
+                class="w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-200 dark:border-slate-700 dark:bg-slate-800 shadow-sm"
               />
             </div>
 
@@ -215,7 +215,7 @@
                 v-model="modalData.config"
                 placeholder="Paste your [Peer] or [Interface] config block here..."
                 required
-                class="w-full flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-mono outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-200 dark:border-slate-700 dark:bg-slate-800 resize-none min-h-[220px]"
+                class="w-full flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-mono outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-200 dark:border-slate-700 dark:bg-slate-800 resize-none min-h-[220px]"
               ></textarea>
             </div>
 
@@ -235,7 +235,7 @@
               <button
                 type="submit"
                 :disabled="submitting"
-                class="flex-1 py-3 px-4 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-lg shadow-blue-500/20"
+                class="flex-1 py-3 px-4 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm shadow-red-500/20 hover:shadow-red-500/40"
               >
                 {{ submitting ? 'Saving...' : (editingId ? 'Update Node' : 'Add Node') }}
               </button>

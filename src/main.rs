@@ -1,6 +1,6 @@
-use actix_files::Files;
-use actix_web::{web, App, HttpServer};
-use itunnel::{api::local_api, logging, wg::config::WireGuardState};
+use actix_web::{web, App, HttpServer, HttpResponse};
+use rust_embed::RustEmbed;
+use itunnel::{api::{local_api, server_local_api}, logging, wg::config::WireGuardState};
 use log::{debug, error, info};
 use std::{
     path::PathBuf,
@@ -9,9 +9,14 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
+    ActivationPolicy,
     Manager,
 };
 use tauri_plugin_opener::OpenerExt;
+
+#[derive(RustEmbed)]
+#[folder = "frontend/dist/"]
+struct EmbeddedAssets;
 
 // ========== Parse CLI Arguments ==========
 fn parse_cli_args() -> itunnel::wg::config::AppMode {
@@ -31,47 +36,50 @@ fn parse_cli_args() -> itunnel::wg::config::AppMode {
 async fn start_actix_server(
     static_dir: PathBuf,
     wg_state: Arc<Mutex<WireGuardState>>,
+    app_mode: itunnel::wg::config::AppMode,
 ) -> std::io::Result<()> {
     // Wrap the shared state in Actix's Data wrapper
     let wg_data = web::Data::from(wg_state);
-    let static_dir = Arc::new(static_dir);
-
-    println!("📁 静态文件目录: {:?}", static_dir);
+    
+    println!("⚙️ 启动基于 Rust-Embed 的单文件模式静态托管");
 
     HttpServer::new(move || {
-        let static_path = static_dir.clone();
-        //let cors = actix_cors::Cors::permissive();
-
-        App::new()
-            //.wrap(cors)
+        
+        let app = App::new()
             .app_data(wg_data.clone())
-            .service(local_api::get_interfaces)
-            .service(local_api::set_wg_config)
-            .service(local_api::get_wg_stats)
-            .service(local_api::get_logs)
-            .service(local_api::user_info_handler)
-            // .service(local_api::get_device_id_handler) // Replaced by user_info_handler
-            .service(local_api::subscribe_plans_handler)
-            .service(local_api::speed_test_handler)
-            .service(local_api::speed_test_servers_handler)
-            .service(local_api::enable_gateway_api)
-            .service(local_api::disable_gateway_api)
-            .service(local_api::gateway_status_api)
-            .service(local_api::connect_handler)
-            .service(local_api::disconnect_handler)
-            .service(local_api::switch_node_handler)
-            .service(local_api::subscribe_req_handler)
-            .service(local_api::get_wg_config)
-            // ========== New Endpoints for Client Mode ==========
-            .service(local_api::get_mode_handler)
-            .service(local_api::get_endpoints_handler)
-            .service(local_api::select_endpoint_handler)
-            .service(local_api::add_endpoint_handler)
-            .service(local_api::update_endpoint_handler)
-            .service(local_api::delete_endpoint_handler)
-            .service(local_api::save_enhance_mode_handler)
-            .service(local_api::get_enhance_mode_handler)
-            .service(Files::new("/", static_path.as_ref()).index_file("index.html"))
+            .configure(local_api::common_routes);
+
+        let app = match app_mode {
+            itunnel::wg::config::AppMode::Client => app.configure(local_api::client_routes),
+            itunnel::wg::config::AppMode::Server => app.configure(server_local_api::server_routes),
+        };
+
+        app.default_service(
+            actix_web::web::get().to(|req: actix_web::HttpRequest| async move {
+                let mut path = req.path().trim_start_matches('/');
+                if path.is_empty() {
+                    path = "index.html";
+                }
+                
+                // Check if file exists in the embedded binary
+                if let Some(content) = EmbeddedAssets::get(path) {
+                    let mime_type = mime_guess::from_path(path).first_or_octet_stream();
+                    return HttpResponse::Ok()
+                        .content_type(mime_type.as_ref())
+                        .body(content.data.into_owned());
+                }
+                
+                // Fallback to index.html for SPA History routing
+                if let Some(content) = EmbeddedAssets::get("index.html") {
+                    return HttpResponse::Ok()
+                        .content_type("text/html")
+                        .body(content.data.into_owned());
+                }
+                
+                // Worst case
+                HttpResponse::NotFound().body("404 Not Found")
+            })
+        )
     })
     .bind(("127.0.0.1", 8181))?
     .run()
@@ -83,6 +91,19 @@ async fn start_actix_server(
 fn main() {
     // init logging
     logging::init();
+
+    // Auto-generate .env if not exists
+    let env_path = std::path::Path::new(".env");
+    if !env_path.exists() {
+        let env_content = "PrivateKey=<YOUR_SERVER_PRIVATE_KEY>\n\
+InterfaceName=utun88\n\
+Endpoint=<YOUR_SERVER_IP>:51820\n";
+        if let Err(e) = std::fs::write(env_path, env_content) {
+            log::error!("⚠️ Failed to create default .env file: {}", e);
+        } else {
+            log::info!("✅ Created default .env fallback configuration.");
+        }
+    }
 
     // ========== Parse CLI Arguments ==========
     let app_mode = parse_cli_args();
@@ -166,6 +187,9 @@ fn main() {
             }
         })
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(ActivationPolicy::Accessory);
+
             // 获取静态文件目录路径
             let static_dir = if cfg!(dev) {
                 // 开发环境：使用相对路径
@@ -192,7 +216,7 @@ fn main() {
             std::thread::spawn(move || {
                 println!("🌐 正在 127.0.0.1:8181 启动 Web 服务...");
                 match actix_web::rt::System::new()
-                    .block_on(start_actix_server(static_dir, wg_state_actix))
+                    .block_on(start_actix_server(static_dir, wg_state_actix, app_mode))
                 {
                     Ok(_) => println!("✅ Actix 服务已启动"),
                     Err(e) => {
@@ -259,7 +283,7 @@ fn main() {
                                 itunnel::wg::WireGuardApi::turn_off(handle);
                                 state.handle = None;
                                 if let Err(e) =
-                                    itunnel::wg::config::clear_network_config(&mut *state)
+                                    itunnel::wg::client::clear_network_config(&mut *state)
                                 {
                                     eprintln!("Tray: Failed to clear network config: {}", e);
                                 }
@@ -290,7 +314,7 @@ fn main() {
                                 }
 
                                 if state.payload.is_some() || state.config.is_some() {
-                                    match itunnel::wg::config::apply_wg_config(&mut *state) {
+                                    match itunnel::wg::client::apply_wg_config(&mut *state) {
                                         Ok(handle) => {
                                             println!(
                                                 "Tray: Connected successfully, handle {}",
@@ -397,7 +421,16 @@ fn handle_exit(wg_state: std::sync::Arc<std::sync::Mutex<itunnel::wg::config::Wi
     }
 
     if let Some(mut state) = state_guard {
-        let _ = state.stop_and_cleanup();
+        match state.app_mode {
+            itunnel::wg::config::AppMode::Server => {
+                if let Err(e) = itunnel::wg::server::stop(&mut state) {
+                    log::error!("Server stop failed during exit: {}", e);
+                }
+            }
+            itunnel::wg::config::AppMode::Client => {
+                let _ = state.stop_and_cleanup();
+            }
+        }
     } else {
         log::error!("最终未能获取状态锁，执行强制退出。系统路由可能未能完全恢复！");
     }

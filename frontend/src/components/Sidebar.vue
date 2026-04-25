@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import {
     Bars4Icon,
     CursorArrowRippleIcon,
     CreditCardIcon,
     GlobeAltIcon,
+    UsersIcon,
 } from "@heroicons/vue/24/outline";
+import { useWireGuardStore } from '@/stores/wireguard';
 
 defineProps<{
     collapsed: boolean;
@@ -13,12 +16,24 @@ defineProps<{
 
 defineEmits(["toggle", "close"]);
 
-const items = [
-    { name: "Overview", icon: CursorArrowRippleIcon, to: "/" },
-    { name: "Endpoints", icon: GlobeAltIcon, to: "/endpoints" },
-    { name: "Subscription", icon: CreditCardIcon, to: "/subscribe" },
-    { name: "Logs", icon: Bars4Icon, to: "/logs" }
-];
+const store = useWireGuardStore();
+
+const items = computed(() => {
+    if (store.mode === 'server') {
+        return [
+            { name: "Dashboard", icon: CursorArrowRippleIcon, to: "/" },
+            { name: "Peers", icon: UsersIcon, to: "/peers" },
+            { name: "Logs", icon: Bars4Icon, to: "/logs" }
+        ];
+    } else {
+        return [
+            { name: "Overview", icon: CursorArrowRippleIcon, to: "/" },
+            { name: "Endpoints", icon: GlobeAltIcon, to: "/endpoints" },
+            { name: "Subscription", icon: CreditCardIcon, to: "/subscribe" },
+            { name: "Logs", icon: Bars4Icon, to: "/logs" }
+        ];
+    }
+});
 </script>
 
 <template>

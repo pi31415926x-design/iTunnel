@@ -73,9 +73,7 @@ onUnmounted(() => {
                 text-center text-xs
                 text-gray-400
                 dark:text-gray-400
-            ">
-                {{ APP_CONFIG.copyright }}
-            </footer>
+            " v-html="APP_CONFIG.copyright" />
         </div>
     </div>
 </template>

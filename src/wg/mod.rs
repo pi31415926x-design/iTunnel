@@ -4,8 +4,11 @@ use log::debug;
 use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
+pub mod client;
 pub mod config;
+pub mod server;
 pub mod store;
+pub mod tun;
 
 /// 全局状态实例，允许 FFI 回调更新状态
 static WG_STATE_INSTANCE: OnceLock<Arc<Mutex<config::WireGuardState>>> = OnceLock::new();
@@ -161,6 +164,11 @@ impl WireGuardApi {
     }
 
     /// 开启 WireGuard 隧道
+    ///
+    /// NOTE: interference detection (AmneziaWG anti-censorship) is NOT enabled
+    /// automatically. Callers that need it (e.g. client mode) must invoke
+    /// [`enable_interference_detection`] explicitly. Server mode skips it so
+    /// vanilla WireGuard peers can still connect.
     pub fn turn_on(settings: &str, tun_fd: i32) -> Result<i32, String> {
         let settings_str = settings.to_string();
         debug!("wgTurnOn with config: {}", settings_str);
@@ -169,10 +177,14 @@ impl WireGuardApi {
         if handle < 0 {
             Err("Failed to turn on wireguard interface".to_string())
         } else {
-            // default to enable interference detection
-            unsafe { ffi::wgEnableInterferenceDetection(handle as c_int, true) };
             Ok(handle)
         }
+    }
+
+    /// Toggle AmneziaWG interference detection on a running tunnel.
+    /// Client mode uses this; server mode does not.
+    pub fn enable_interference_detection(handle: i32, enable: bool) {
+        unsafe { ffi::wgEnableInterferenceDetection(handle, enable) };
     }
 
     /// 关闭隧道
@@ -251,12 +263,6 @@ impl WireGuardApi {
         Ok((rx, tx))
     }
 
-    /// Get wg config
-    pub fn get_wg_config(handle: i32) {
-        unsafe {
-            debug!("WireGuard Config is: {:?}", Self::get_config(handle));
-        }
-    }
 }
 
 #[cfg(test)]

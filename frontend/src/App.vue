@@ -33,8 +33,7 @@ onMounted(async () => {
     initialized.value = true;
   } catch (err) {
     console.error('Failed to initialize app:', err);
-    // Show error UI here if needed
-    initialized.value = true; // Still show app with error state
+    initialized.value = true;
   }
 });
 </script>
