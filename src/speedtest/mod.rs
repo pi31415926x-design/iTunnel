@@ -1,8 +1,10 @@
 use log::debug;
+#[cfg(target_os = "macos")]
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::net::TcpSocket;
+#[cfg(target_os = "macos")]
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -189,10 +191,9 @@ async fn test_ip_latency_icmp(ip: &str) -> Option<u128> {
         return None;
     }
 
-    let is_ipv6 = ip.contains(':');
-
     #[cfg(target_os = "macos")]
     {
+        let is_ipv6 = ip.contains(':');
         if let Some(info) = get_physical_interface_info() {
             let cmd = if is_ipv6 { "ping6" } else { "ping" };
             let mut command = Command::new(cmd);

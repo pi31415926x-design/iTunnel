@@ -4,4 +4,3 @@ pub mod interface;
 pub mod logging;
 pub mod speedtest;
 pub mod wg;
-pub mod fakeip;

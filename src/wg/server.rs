@@ -35,6 +35,7 @@ use crate::wg::tun::TunDevice;
 use crate::wg::WireGuardApi;
 use log::{info, debug, warn};
 use std::net::Ipv4Addr;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Default MTU for the server TUN. 1280 is the typical conservative WG MTU
@@ -500,6 +501,7 @@ fn cleanup_server_routes(_iface: &str, _addr_list: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn ipv4_network_cidr(cidr: &str) -> Option<String> {
     let (ip_str, prefix_str) = cidr.split_once('/')?;
     let ip: Ipv4Addr = ip_str.trim().parse().ok()?;
