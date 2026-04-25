@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 fn main() {
@@ -11,6 +12,7 @@ fn main() {
     let libs_dir = manifest_dir.join("libs");
     let target = env::var("TARGET").expect("TARGET");
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
     // Do not add native=. here: the crate root may still contain an old libwg-go-x86_64.so and the
     // linker would pick it before OUT_DIR. Only link native libraries from OUT_DIR below.
@@ -25,7 +27,7 @@ fn main() {
 
     let wg = discover_wg_go(&roots, &os, &target).unwrap_or_else(|m| {
         panic!(
-            "{m}\nExpected libwg-go.so (Windows: libwg-go.dll) or libwg-go.a under:\n  macOS: libs/x86_64-apple-darwin/ or libs/aarch64-apple-darwin/\n  Linux: libs/Linux/\n  (then libs/ as fallback)"
+            "{m}\nExpected libwg-go.so (Windows: libwg-go.dll) or libwg-go.a under:\n  macOS: libs/x86_64-apple-darwin/ or libs/aarch64-apple-darwin/\n  linux: libs/linux/\n  windows: libs/windows/ (or libs/<TARGET>/)\n  (then libs/ as fallback)"
         )
     });
 
@@ -51,7 +53,12 @@ fn main() {
         }
     }
 
-    println!("cargo:rustc-link-lib={wg_link_kind}=wg-go");
+    // MSVC: `-l dylib=wg-go` looks for `wg-go.lib`; c-shared from Go is only `libwg-go.dll`.
+    // `#[link(..., kind = "raw-dylib")]` in `src/wg/mod.rs` links the DLL; we only need OUT_DIR -L.
+    let msvc_raw_dylib = os == "windows" && target_env == "msvc" && matches!(&wg, WgGoArtifact::Shared(_));
+    if !msvc_raw_dylib {
+        println!("cargo:rustc-link-lib={wg_link_kind}=wg-go");
+    }
 
     if os == "macos" {
         println!("cargo:rustc-link-lib=framework=Security");
@@ -62,7 +69,8 @@ fn main() {
 
 /// Platform layout:
 /// - macOS: `libs/x86_64-apple-darwin/` (Intel), `libs/aarch64-apple-darwin/` (Apple Silicon); current `TARGET` is tried first.
-/// - Linux: `libs/Linux/`
+/// - linux: `libs/linux/`
+/// - windows: `libs/windows/`, then `libs/<TARGET>/`, then `libs/`.
 /// - Other: `libs/<TARGET>/`, then `libs/`.
 fn lib_search_roots(libs_dir: &Path, target_triple: &str, os: &str) -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -77,7 +85,11 @@ fn lib_search_roots(libs_dir: &Path, target_triple: &str, os: &str) -> Vec<PathB
             }
         }
         "linux" => {
-            v.push(libs_dir.join("Linux"));
+            v.push(libs_dir.join("linux"));
+        }
+        "windows" => {
+            v.push(libs_dir.join("windows"));
+            v.push(libs_dir.join(target_triple));
         }
         _ => {
             v.push(libs_dir.join(target_triple));
