@@ -1,0 +1,9 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml"
+  ],
+  "rust-analyzer.checkOnSave": true,
+  "rust-analyzer.check.command": "check",
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.procMacro.enable": true
+}
