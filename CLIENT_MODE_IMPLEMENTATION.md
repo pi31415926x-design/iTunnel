@@ -8,8 +8,9 @@
 
 #### 后端 (Rust + Tauri)
 1. **命令行参数支持**
-   - `itunnel -c` 或 `itunnel --client` → Client模式（默认）
-   - `itunnel -s` 或 `itunnel --server` → Server模式
+   - 无模式参数：默认 **Client** + Tauri
+   - `itunnel --client` / `-c` 或 `itunnel --server` / `-s`：对应模式、**无 GUI**（仅 Actix）
+   - 加 `--gui`：在指定模式下启动 Tauri 托盘
 
 2. **新增数据结构**
    - `AppMode`: Client/Server枚举
@@ -83,11 +84,13 @@
 cd /Users/haogle/github/itunnel
 cargo build --release
 
-# 以Client模式运行
-./target/release/itunnel -c
+# Client 模式（无 GUI）
+./target/release/itunnel --client
 
-# 以Server模式运行
-./target/release/itunnel -s
+# Server 模式（无 GUI）
+./target/release/itunnel --server
+
+# 需要托盘时加 --gui，例如: ./target/release/itunnel --client --gui
 ```
 
 #### 前端开发
@@ -105,6 +108,8 @@ npm run build
 ```
 
 ### API使用示例
+
+（URL 中端口默认为 **8181**；以项目根 `.env` 的 `ListenPort` 为准。）
 
 #### 1. 检测当前模式
 ```bash
@@ -291,11 +296,13 @@ Response: {
 
 1. **集成测试**
    ```bash
-   # 测试Client模式启动
-   itunnel -c
-   
-   # 访问Web UI: http://127.0.0.1:8181
-   # 测试各页面和功能
+   # 测试 Client 模式（无 GUI）启动
+   itunnel --client
+
+   # 或带 Tauri
+   itunnel --client --gui
+
+   # 访问 Web UI：默认 http://127.0.0.1:8181，端口以 .env 的 ListenPort 为准
    ```
 
 2. **功能完善**

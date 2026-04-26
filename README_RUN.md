@@ -4,7 +4,9 @@
 
 你的 iTunnel 应用已经成功构建！
 
-**可执行文件位置**: `/Users/haogle/github/itunnel/target/release/app`
+**可执行文件位置**（`cargo build --release` 后）: `target/release/itunnel`（包名与 `Cargo.toml` 中 `name` 一致）
+
+**HTTP 端口**：默认 `8181`，由项目根目录 `.env` 中 `ListenPort` 覆盖；下文 `http://127.0.0.1:8181` 在无自定义端口时适用。
 
 ---
 
@@ -13,12 +15,12 @@
 ### 方式 1: 直接运行（推荐）
 
 ```bash
-sudo ./target/release/app
+sudo ./target/release/itunnel
 ```
 
 **特点**:
 - ✅ 系统托盘图标
-- ✅ 后台 HTTP 服务 (http://127.0.0.1:8181)
+- ✅ 后台 HTTP 服务（默认 http://127.0.0.1:8181，以 `.env` 为准）
 - ✅ 可以关闭 terminal，应用继续运行
 
 ### 方式 2: 使用后台脚本
@@ -66,7 +68,7 @@ tail -f /tmp/itunnel.log
 
 运行后，你会在 macOS 菜单栏看到 iTunnel 图标：
 
-1. **配置** - 打开浏览器访问 http://127.0.0.1:8181
+1. **配置** - 打开浏览器访问 Web UI（默认 `http://127.0.0.1:8181`，见 `.env` 的 `ListenAddress` / `ListenPort`）
 2. **退出** - 完全退出应用
 
 ---
@@ -75,12 +77,12 @@ tail -f /tmp/itunnel.log
 
 ```bash
 # 1. 启动应用
-sudo ./target/release/app
+sudo ./target/release/itunnel
 
 # 2. 关闭 terminal 窗口（应用继续运行）
 
 # 3. 点击托盘图标 → 配置
-#    浏览器会打开 http://127.0.0.1:8181
+#    浏览器会打开 Web UI（端口与 .env 中 ListenPort 一致，默认 8181）
 
 # 4. 在 Settings 页面配置 WireGuard
 ```
@@ -115,7 +117,7 @@ sudo ./target/release/app
 
 ## 📁 文件说明
 
-- `target/release/app` - 主程序
+- `target/release/itunnel` - 主程序（Rust 二进制）
 - `run_background.sh` - 后台启动脚本
 - `stop.sh` - 停止脚本
 - `status.sh` - 状态检查脚本
@@ -127,7 +129,7 @@ sudo ./target/release/app
 ## ⚠️ 注意事项
 
 1. **需要 root 权限**: WireGuard 操作需要 sudo
-2. **端口占用**: 确保 8181 端口未被占用
+2. **端口占用**: 确保 `.env` 中 `ListenPort`（默认 `8181`）未被占用
 3. **防火墙**: 可能需要允许应用通过防火墙
 
 ---
@@ -140,7 +142,7 @@ sudo ./target/release/app
 # 查看日志
 cat /tmp/itunnel.log
 
-# 检查端口
+# 检查端口（将 8181 换成你的 ListenPort）
 lsof -i :8181
 ```
 

@@ -1,6 +1,14 @@
 #!/bin/bash
 
-# iTunnel 停止脚本
+# iTunnel 停止脚本（在仓库根目录执行）
+
+cd "$(dirname "$0")" || exit 1
+
+HTTP_LISTEN_PORT=8181
+if [ -f .env ]; then
+  _v=$(awk -F= '/^[Ll]isten[Pp]ort=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' .env 2>/dev/null)
+  [ -n "$_v" ] && HTTP_LISTEN_PORT="$_v"
+fi
 
 echo "🛑 正在停止 iTunnel..."
 
@@ -31,7 +39,7 @@ else
     echo "⚠️  未找到 PID 文件"
     
     # 尝试通过端口查找进程
-    PORT_PID=$(lsof -ti:8181)
+    PORT_PID=$(lsof -ti:"${HTTP_LISTEN_PORT}")
     if [ ! -z "$PORT_PID" ]; then
         echo "📍 通过端口找到进程: $PORT_PID"
         sudo kill $PORT_PID

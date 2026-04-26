@@ -1,59 +1,63 @@
-//! Local DNS: small primitives per platform, optional [`DnsState`] for one pending restore.
+//! Local DNS: **data** ([`DnsMode`], [`DnsSnapshot`]), **pure interpretation** ([`parse`]),
+//! **effects** ([`DnsBackend`]), and optional **session** state ([`DnsState`]).
 //!
-//! Typical flow: [`begin_override`], work, then [`restore`]. You can also call
-//! [`capture_snapshot`] + [`set_dns_manual`] / [`set_dns_automatic`] + [`apply_snapshot`]
-//! for custom control.
+//! Typical flow: [`begin_override`], work, then [`restore`]. For custom control, use
+//! [`DnsSnapshot::capture`] / [`DnsBackend`] primitives / [`DnsSnapshot::apply`].
 
+mod backend;
 mod error;
+mod model;
+pub mod parse;
+mod session;
 #[cfg(target_os = "macos")]
 mod macos;
-mod snapshot;
-mod state;
 #[cfg(not(target_os = "macos"))]
 mod stub;
 
+pub use backend::DnsBackend;
 pub use error::DnsError;
-pub use snapshot::{DnsMode, DnsSnapshot};
-pub use state::DnsState;
+pub use model::{DnsMode, DnsSnapshot};
+pub use session::{begin_override_with, restore_with, DnsState};
 
 #[cfg(target_os = "macos")]
-use macos as platform;
+pub use macos::NetworkSetup;
 #[cfg(not(target_os = "macos"))]
-use stub as platform;
+pub use stub::Unsupported;
 
-// ——— composable one-shot API ———
+#[cfg(target_os = "macos")]
+const DEFAULT: NetworkSetup = NetworkSetup;
+#[cfg(not(target_os = "macos"))]
+const DEFAULT: Unsupported = Unsupported;
 
 /// Read current mode for a network service (e.g. `Wi-Fi` on macOS).
 pub fn get_dns_mode(service: &str) -> Result<DnsMode, DnsError> {
-    platform::get_dns_mode(service)
+    DEFAULT.get_dns_mode(service)
 }
 
 /// Set fixed DNS servers for a service. Fails on empty `servers` (use [`set_dns_automatic`]).
 pub fn set_dns_manual(service: &str, servers: &[String]) -> Result<(), DnsError> {
-    platform::set_dns_manual(service, servers)
+    DEFAULT.set_dns_manual(service, servers)
 }
 
 /// Clear manual DNS; use system/DHCP for that service.
 pub fn set_dns_automatic(service: &str) -> Result<(), DnsError> {
-    platform::set_dns_automatic(service)
+    DEFAULT.set_dns_automatic(service)
 }
 
 /// List network service names available to `networksetup` (macOS) or the platform equivalent.
 pub fn list_network_service_names() -> Result<Vec<String>, DnsError> {
-    platform::list_network_service_names()
+    DEFAULT.list_network_service_names()
 }
 
 /// Read current state so it can be re-applied later.
 pub fn capture_snapshot(service: &str) -> Result<DnsSnapshot, DnsError> {
-    platform::capture_snapshot(service)
+    DEFAULT.capture_snapshot(service)
 }
 
 /// Re-apply a [`DnsSnapshot`] (restore after override, or copy settings).
 pub fn apply_snapshot(snap: &DnsSnapshot) -> Result<(), DnsError> {
-    platform::apply_snapshot(snap)
+    DEFAULT.apply_snapshot(snap)
 }
-
-// ——— stateful: one active override, restore to snapshot ———
 
 /// Capture current DNS, store in `state`, then set `new_servers`. Fails if a restore is still pending.
 pub fn begin_override(
@@ -61,33 +65,14 @@ pub fn begin_override(
     service: &str,
     new_servers: &[String],
 ) -> Result<(), DnsError> {
-    if state.has_pending_restore() {
-        return Err(DnsError::ActiveSession);
-    }
-    if new_servers.is_empty() {
-        return Err(DnsError::EmptyServers);
-    }
-    let snap = capture_snapshot(service)?;
-    set_dns_manual(service, new_servers)?;
-    state.set_pending(snap);
-    Ok(())
+    begin_override_with(&DEFAULT, state, service, new_servers)
 }
 
 /// Apply the stored [`DnsSnapshot`] and clear it. If apply fails, the snapshot is put back.
 pub fn restore(state: &mut DnsState) -> Result<(), DnsError> {
-    let Some(snap) = state.take_pending() else {
-        return Err(DnsError::NothingToRestore);
-    };
-    match apply_snapshot(&snap) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            state.set_pending(snap);
-            Err(e)
-        }
-    }
+    restore_with(&DEFAULT, state)
 }
 
-// macOS-only: expose raw `networksetup` escape hatch for power users
 #[cfg(target_os = "macos")]
 pub mod macos_raw {
     pub use crate::dns::macos::run_networksetup;

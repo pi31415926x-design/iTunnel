@@ -10,6 +10,13 @@ import { useEndpointsStore } from './endpoints';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+/** Set by the Rust Actix `index.html` response (CLI `app_mode`); no `.env` on the client. */
+declare global {
+  interface Window {
+    __ITUNNEL_APP_MODE__?: AppMode;
+  }
+}
+
 export const useWireGuardStore = defineStore('wireguard', () => {
   // ========== State ==========
   const mode = ref<AppMode>('client');
@@ -48,6 +55,14 @@ export const useWireGuardStore = defineStore('wireguard', () => {
       mode.value = forcedMode;
       isInitialized.value = true;
       console.log('✅ WireGuard store initialized with forced mode:', mode.value);
+      return;
+    }
+
+    const injected = typeof window !== 'undefined' ? window.__ITUNNEL_APP_MODE__ : undefined;
+    if (injected === 'server' || injected === 'client') {
+      mode.value = injected;
+      isInitialized.value = true;
+      console.log('✅ WireGuard store: mode from binary (injected in index.html):', mode.value);
       return;
     }
 
