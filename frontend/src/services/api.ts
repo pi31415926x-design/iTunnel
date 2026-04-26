@@ -19,8 +19,24 @@ export enum HttpMethod {
   PATCH = 'PATCH',
 }
 
+/**
+ * 监听地址/端口只由 **Rust**（`src/main.rs` 等）从根目录 `.env` 读入并 `bind`；前端构建物不会读该文件。
+ *
+ * 默认不设置 `baseUrl`，用相对路径请求 `/api/...`，与当前页 **同源**（与 Actix 实际监听的 host/port 一致即可）。
+ * 曾用写死的 `http://127.0.0.1:8181` 时，在绑定端口或浏览器 host（如 `localhost` vs `127.0.0.1`）与请求 URL 不一致会导致 `/api/mode` 等失败。
+ *
+ * 需要固定到某个绝对地址时，设置 `VITE_API_BASE`（无尾斜杠）。
+ */
+function resolveApiBase(): string {
+  const v = import.meta.env.VITE_API_BASE;
+  if (v !== undefined && v !== null && String(v).trim() !== '') {
+    return String(v).replace(/\/$/, '');
+  }
+  return '';
+}
+
 class ApiClient {
-  private baseUrl: string = 'http://127.0.0.1:8181';
+  private baseUrl: string = resolveApiBase();
   private timeout: number = 10000; // 10 seconds
 
   async request<T>(
@@ -28,7 +44,8 @@ class ApiClient {
     method: HttpMethod = HttpMethod.GET,
     body?: any,
   ): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
+    const pathPart = path.startsWith('/') ? path : `/${path}`;
+    const url = this.baseUrl ? `${this.baseUrl}${pathPart}` : pathPart;
     const options: RequestInit = {
       method,
       headers: {

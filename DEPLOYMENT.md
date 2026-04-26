@@ -113,7 +113,7 @@ sudo nano ~/Library/LaunchAgents/com.itunnel.app.plist
     
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/haogle/github/itunnel/target/release/app</string>
+        <string>/Users/haogle/github/itunnel/target/release/itunnel</string>
     </array>
     
     <key>RunAtLoad</key>
@@ -163,17 +163,11 @@ let _tray = TrayIconBuilder::new()
 
 ### 2. 后台 HTTP 服务 ✅
 
-```rust
-// 在独立线程运行，不阻塞 GUI
-std::thread::spawn(move || {
-    println!("正在 127.0.0.1:8181 启动 Web 服务...");
-    actix_web::rt::System::new().block_on(start_actix_server())
-});
-```
+在独立线程运行 Actix，不阻塞 GUI；监听地址与端口由项目根 `.env` 的 `ListenAddress`、`ListenPort` 决定（默认 `127.0.0.1:8181`）。实现见 `src/main.rs` 中 `spawn_actix_background` / `start_actix_server`。
 
 ### 3. 托盘菜单功能 ✅
 
-- **配置**: 打开浏览器访问 http://127.0.0.1:8181
+- **配置**: 打开浏览器访问 Web UI（默认 `http://127.0.0.1:8181`，以 `.env` 为准）
 - **退出**: 完全退出应用
 
 ---
@@ -199,8 +193,8 @@ cd frontend && npm run build && cd ..
 # 2. 构建 Release 版本
 cargo build --release
 
-# 3. 运行（仍在 terminal）
-./target/release/app
+# 3. 运行（仍在 terminal；二进制名与 Cargo 包名一致，一般为 itunnel）
+./target/release/itunnel
 
 # 4. 或打包成应用（完全脱离 terminal）
 cargo tauri build
@@ -217,14 +211,14 @@ cargo tauri build
 #### 方案 A: 使用 sudo 运行
 
 ```bash
-sudo ./target/release/app
+sudo ./target/release/itunnel
 ```
 
 #### 方案 B: 设置 setuid（不推荐，安全风险）
 
 ```bash
-sudo chown root:wheel ./target/release/app
-sudo chmod u+s ./target/release/app
+sudo chown root:wheel ./target/release/itunnel
+sudo chmod u+s ./target/release/itunnel
 ```
 
 #### 方案 C: 使用 Helper Tool（推荐）
@@ -289,7 +283,7 @@ tail -f /tmp/itunnel.error.log
 ### 端口占用
 
 ```bash
-# 检查端口
+# 检查端口（将 8181 换成 .env 中的 ListenPort，未设置时默认为 8181）
 lsof -i :8181
 
 # 杀死进程
@@ -300,7 +294,7 @@ kill -9 <PID>
 
 ```bash
 # 检查文件权限
-ls -la ./target/release/app
+ls -la ./target/release/itunnel
 
 # 重新编译
 cargo clean
