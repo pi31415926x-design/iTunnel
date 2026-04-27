@@ -1,17 +1,25 @@
 #!/bin/bash
 
-# iTunnel 状态检查脚本
+# iTunnel 状态检查脚本（在仓库根目录执行）
+
+cd "$(dirname "$0")" || exit 1
+
+HTTP_LISTEN_PORT=8181
+if [ -f .env ]; then
+  _v=$(awk -F= '/^[Ll]isten[Pp]ort=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' .env 2>/dev/null)
+  [ -n "$_v" ] && HTTP_LISTEN_PORT="$_v"
+fi
 
 echo "📊 iTunnel 状态检查"
 echo "===================="
 echo ""
 
 # 检查端口
-if lsof -Pi :8181 -sTCP:LISTEN -t >/dev/null ; then
-    PID=$(lsof -ti:8181)
+if lsof -Pi :"${HTTP_LISTEN_PORT}" -sTCP:LISTEN -t >/dev/null ; then
+    PID=$(lsof -ti:"${HTTP_LISTEN_PORT}")
     echo "✅ 服务状态: 运行中"
     echo "📍 进程 PID: $PID"
-    echo "🌐 Web UI: http://127.0.0.1:8181"
+    echo "🌐 Web UI: http://127.0.0.1:${HTTP_LISTEN_PORT}"
     echo ""
     
     # 显示进程信息

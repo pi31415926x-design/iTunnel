@@ -4,6 +4,8 @@
 
 该实施为iTunnel添加了**Client/Server模式**支持，并为Client模式设计了全新的UI。用户可以通过命令行参数选择运行模式。
 
+**HTTP / API 基础地址**：由项目根 `.env` 的 `ListenAddress`、`ListenPort` 决定；未设置时默认 `http://127.0.0.1:8181`。开发时若修改了 `ListenPort`，需同步 `frontend/vite.config.ts` 里 dev server 的 `/api` 代理目标，以及 `frontend/src/services/api.ts` 中的 `baseUrl`（或使用与页面同源的相对路径）。
+
 ---
 
 ## 🚀 快速启动
@@ -16,11 +18,16 @@ cd /Users/haogle/github/itunnel
 # 编译调试版本
 cargo build
 
-# 以Client模式运行（默认）
-./target/debug/itunnel -c
+# 无 GUI，仅 Actix（Client / Server）
+./target/debug/itunnel --client
+./target/debug/itunnel --server
 
-# 或者以Server模式运行
-./target/debug/itunnel -s
+# 带 Tauri 托盘 + Actix
+./target/debug/itunnel --client --gui
+./target/debug/itunnel --server --gui
+
+# 无参数：默认 Client + Tauri
+./target/debug/itunnel
 ```
 
 ### 2. 前端开发环境
@@ -35,7 +42,7 @@ npm install
 npm run dev
 
 # 访问: http://localhost:5173/
-# API后端: http://127.0.0.1:8181/
+# API 代理到后端（默认 http://127.0.0.1:8181，与 .env ListenPort 一致）
 ```
 
 ### 3. 生产构建
@@ -78,6 +85,8 @@ cargo build --release
 ---
 
 ## 🔌 API参考
+
+以下 URL 使用默认端口 **8181**；若 `.env` 中配置了 `ListenPort`，请替换 URL 中的端口。
 
 ### 模式检测
 ```bash
@@ -233,17 +242,16 @@ Console标签：
 
 1. **权限** - 在macOS上运行WireGuard可能需要sudo权限
    ```bash
-   sudo ./target/debug/itunnel -c
+   sudo ./target/debug/itunnel --client
    ```
 
-2. **端口占用** - 确保端口8181未被占用
+2. **端口占用** - 确保 `.env` 中 `ListenPort`（默认 8181）未被占用
    ```bash
-   # 查看占用8181端口的进程
-   lsof -i :8181
+   lsof -i :8181   # 将 8181 换成你的 ListenPort
    ```
 
 3. **CORS问题** - 当前前后端分离，确保API请求没有跨域问题
-   - 开发环境：前端localhost:5173 → 后端127.0.0.1:8181
+   - 开发环境：前端 `localhost:5173` → 后端 `127.0.0.1:<ListenPort>`（默认 8181）
    - 如有问题，可在main.rs中启用CORS
 
 4. **数据持久化** - Store中的数据在浏览器刷新后会重新加载

@@ -3,6 +3,7 @@ use rust_embed::RustEmbed;
 use itunnel::{api::{local_api, server_local_api}, logging, wg::config::WireGuardState};
 use log::{debug, error, info};
 use std::{
+    net::IpAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -19,26 +20,96 @@ use tauri_plugin_opener::OpenerExt;
 #[folder = "frontend/dist/"]
 struct EmbeddedAssets;
 
-// ========== Parse CLI Arguments ==========
-struct StartupOptions {
-    app_mode: itunnel::wg::config::AppMode,
-    /// No Tauri window / tray; only Actix on 127.0.0.1:8181 (for servers & automation).
-    headless: bool,
-}
+/// HTTP UI/API server bind. Reads `ListenAddress` and `ListenPort` from `.env` (case-insensitive
+/// keys). Defaults: `127.0.0.1:8181` if missing or unparseable.
+fn load_http_listen_from_env() -> (IpAddr, u16) {
+    const DEFAULT_ADDR: &str = "127.0.0.1";
+    const DEFAULT_PORT: u16 = 8181;
 
-fn parse_startup_options() -> StartupOptions {
-    let args: Vec<String> = std::env::args().collect();
-    let mut app_mode = itunnel::wg::config::AppMode::Client;
-    let mut headless = false;
+    let default_ip: IpAddr = DEFAULT_ADDR.parse().expect("valid default");
 
-    for arg in &args {
-        match arg.as_str() {
-            "-s" | "--server" => app_mode = itunnel::wg::config::AppMode::Server,
-            "-c" | "--client" => app_mode = itunnel::wg::config::AppMode::Client,
-            "--cli" | "--headless" | "-n" => headless = true,
+    let content = match std::fs::read_to_string(".env") {
+        Ok(c) => c,
+        Err(_) => return (default_ip, DEFAULT_PORT),
+    };
+
+    let mut listen_addr: Option<IpAddr> = None;
+    let mut listen_port: Option<u16> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_lowercase();
+        let value = value.trim();
+        match key.as_str() {
+            "listenaddress" => {
+                if let Ok(ip) = value.parse() {
+                    listen_addr = Some(ip);
+                }
+            }
+            "listenport" => {
+                if let Ok(p) = value.parse() {
+                    listen_port = Some(p);
+                }
+            }
             _ => {}
         }
     }
+
+    (
+        listen_addr.unwrap_or(default_ip),
+        listen_port.unwrap_or(DEFAULT_PORT),
+    )
+}
+
+/// Base URL to open in a local browser. Unspecified addresses (`0.0.0.0`, `::`) map to loopback.
+fn http_url_for_local_browser(addr: IpAddr, port: u16) -> String {
+    use std::net::Ipv4Addr;
+    let host = match addr {
+        IpAddr::V4(a) if a == Ipv4Addr::UNSPECIFIED => "127.0.0.1".to_string(),
+        IpAddr::V4(a) => a.to_string(),
+        IpAddr::V6(a) if a.is_unspecified() => "127.0.0.1".to_string(),
+        IpAddr::V6(a) => format!("[{}]", a),
+    };
+    format!("http://{}:{}", host, port)
+}
+
+// ========== Parse CLI Arguments ==========
+struct StartupOptions {
+    app_mode: itunnel::wg::config::AppMode,
+    /// No Tauri window / tray; only Actix. See `parse_startup_options` for how this is set.
+    headless: bool,
+}
+
+/// Mode is chosen by the last of `-s` / `--server` / `-c` / `--client`. With `--server` or
+/// `--client` present, default is no GUI; add `--gui` for the tray+window Tauri app. No mode flag
+/// keeps the default: Client + Tauri.
+fn parse_startup_options() -> StartupOptions {
+    let args: Vec<String> = std::env::args().collect();
+    let mut app_mode = itunnel::wg::config::AppMode::Client;
+    let mut has_mode_flag = false;
+    let mut has_gui = false;
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "-s" | "--server" => {
+                app_mode = itunnel::wg::config::AppMode::Server;
+                has_mode_flag = true;
+            }
+            "-c" | "--client" => {
+                app_mode = itunnel::wg::config::AppMode::Client;
+                has_mode_flag = true;
+            }
+            "--gui" => has_gui = true,
+            _ => {}
+        }
+    }
+
+    let headless = has_mode_flag && !has_gui;
 
     StartupOptions { app_mode, headless }
 }
@@ -47,18 +118,25 @@ fn spawn_actix_background(
     static_dir: PathBuf,
     wg_state: Arc<Mutex<WireGuardState>>,
     app_mode: itunnel::wg::config::AppMode,
+    listen_addr: IpAddr,
+    listen_port: u16,
 ) {
     std::thread::spawn(move || {
-        println!("🌐 正在 127.0.0.1:8181 启动 Web 服务...");
+        println!(
+            "🌐 正在 {}:{} 启动 Web 服务...",
+            listen_addr, listen_port
+        );
         match actix_web::rt::System::new().block_on(start_actix_server(
             static_dir,
             wg_state,
             app_mode,
+            listen_addr,
+            listen_port,
         )) {
             Ok(_) => println!("✅ Actix 服务已启动"),
             Err(e) => {
                 eprintln!("❌ Actix 服务启动失败: {}", e);
-                eprintln!("💡 提示: 请检查端口 8181 是否被占用");
+                eprintln!("💡 提示: 请检查端口 {} 是否被占用", listen_port);
             }
         }
     });
@@ -87,10 +165,33 @@ fn resolve_static_dir_headless() -> PathBuf {
     }
     from_cwd
 }
+
+/// Injects the CLI app mode so the SPA can set `server` / `client` before `/api/mode`, matching the
+/// binary (same as `WireGuardState::app_mode`). Production UI no longer depends on a successful
+/// first `GET /api/mode` to pick ServerOverview vs ClientOverview.
+fn embed_index_html_with_mode(
+    data: std::borrow::Cow<'static, [u8]>,
+    mode: itunnel::wg::config::AppMode,
+) -> Vec<u8> {
+    let mode_str = match mode {
+        itunnel::wg::config::AppMode::Server => "server",
+        itunnel::wg::config::AppMode::Client => "client",
+    };
+    let inject = format!(r#"<script>window.__ITUNNEL_APP_MODE__="{mode_str}";</script>"#);
+    let s = String::from_utf8_lossy(&data);
+    if s.contains("</head>") {
+        s.replace("</head>", &format!("{inject}</head>")).into_bytes()
+    } else {
+        data.into_owned()
+    }
+}
+
 async fn start_actix_server(
     static_dir: PathBuf,
     wg_state: Arc<Mutex<WireGuardState>>,
     app_mode: itunnel::wg::config::AppMode,
+    listen_addr: IpAddr,
+    listen_port: u16,
 ) -> std::io::Result<()> {
     // Wrap the shared state in Actix's Data wrapper
     let wg_data = web::Data::from(wg_state);
@@ -109,7 +210,9 @@ async fn start_actix_server(
         };
 
         app.default_service(
-            actix_web::web::get().to(|req: actix_web::HttpRequest| async move {
+            actix_web::web::get().to(move |req: actix_web::HttpRequest| {
+                let mode = app_mode;
+                async move {
                 let mut path = req.path().trim_start_matches('/');
                 if path.is_empty() {
                     path = "index.html";
@@ -118,24 +221,31 @@ async fn start_actix_server(
                 // Check if file exists in the embedded binary
                 if let Some(content) = EmbeddedAssets::get(path) {
                     let mime_type = mime_guess::from_path(path).first_or_octet_stream();
+                    let body: Vec<u8> = if path == "index.html" {
+                        embed_index_html_with_mode(content.data, mode)
+                    } else {
+                        content.data.into_owned()
+                    };
                     return HttpResponse::Ok()
                         .content_type(mime_type.as_ref())
-                        .body(content.data.into_owned());
+                        .body(body);
                 }
                 
                 // Fallback to index.html for SPA History routing
                 if let Some(content) = EmbeddedAssets::get("index.html") {
+                    let body = embed_index_html_with_mode(content.data, mode);
                     return HttpResponse::Ok()
                         .content_type("text/html")
-                        .body(content.data.into_owned());
+                        .body(body);
                 }
                 
                 // Worst case
                 HttpResponse::NotFound().body("404 Not Found")
+                }
             })
         )
     })
-    .bind(("127.0.0.1", 8181))?
+    .bind((listen_addr, listen_port))?
     .run()
     .await
 }
@@ -159,11 +269,17 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
         }
     }
 
+    let (http_bind_addr, http_bind_port) = load_http_listen_from_env();
+    let local_api_url = http_url_for_local_browser(http_bind_addr, http_bind_port);
+
     // ========== Parse CLI Arguments ==========
     let StartupOptions { app_mode, headless } = parse_startup_options();
     info!("📋 Running in mode: {:?}", app_mode);
     if headless {
-        info!("🖥️  Headless (CLI): Tauri UI disabled; API http://127.0.0.1:8181");
+        info!(
+            "🖥️  Headless (CLI): Tauri UI disabled; API {}",
+            local_api_url
+        );
     }
 
     // Create shared state
@@ -240,8 +356,14 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
         println!("📂 工作目录: {:?}", std::env::current_dir().unwrap());
         println!("📁 静态文件路径 (参考): {:?}", static_dir);
         println!("✅ 静态目录存在: {}", static_dir.exists());
-        spawn_actix_background(static_dir, wg_state.clone(), app_mode);
-        println!("✅ 本地 API: http://127.0.0.1:8181 — Ctrl+C 退出");
+        spawn_actix_background(
+            static_dir,
+            wg_state.clone(),
+            app_mode,
+            http_bind_addr,
+            http_bind_port,
+        );
+        println!("✅ 本地 API: {} — Ctrl+C 退出", local_api_url);
         let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let _ = rx.recv();
         return;
@@ -249,6 +371,7 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
 
     let wg_state_run_window = wg_state.clone();
     let wg_state_run_exit = wg_state.clone();
+    let open_api_url = local_api_url.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .on_window_event(move |window, event| {
@@ -282,7 +405,13 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
             println!("✅ 静态文件目录存在: {}", static_dir.exists());
 
             // 1. 在异步运行时中启动 Actix-web
-            spawn_actix_background(static_dir, wg_state.clone(), app_mode);
+            spawn_actix_background(
+                static_dir,
+                wg_state.clone(),
+                app_mode,
+                http_bind_addr,
+                http_bind_port,
+            );
 
             // 2. 创建托盘菜单项
             let connect_i = MenuItem::with_id(app, "connect", "连接", true, None::<&str>)?;
@@ -332,6 +461,7 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
                 .menu(&menu)
                 .on_menu_event({
                     let wg_state = wg_state.clone();
+                    let open_api_url = open_api_url.clone();
                     move |app, event| match event.id.as_ref() {
                         "connect" => {
                             let mut state = wg_state.lock().unwrap();
@@ -385,13 +515,12 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
                                     error!("Tray: No config found. Opening config page.");
                                     let _ = app
                                         .opener()
-                                        .open_url("http://127.0.0.1:8181", None::<&str>);
+                                        .open_url(&open_api_url, None::<&str>);
                                 }
                             }
                         }
                         "config" => {
-                            let url = "http://127.0.0.1:8181";
-                            let _ = app.opener().open_url(url, None::<&str>);
+                            let _ = app.opener().open_url(&open_api_url, None::<&str>);
                         }
                         "quit" => {
                             handle_exit(wg_state.clone());
