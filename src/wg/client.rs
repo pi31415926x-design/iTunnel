@@ -81,9 +81,9 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
     info!("WireGuard turned on successfully. Handle: {}", handle);
     state.handle = Some(handle);
 
-    // AmneziaWG anti-censorship is opt-in (see WireGuardApi::turn_on docs).
-    // Client mode always wants it.
-    WireGuardApi::enable_interference_detection(handle, true);
+    // AmneziaWG uapi lines are emitted only when `state.enhance_mode.obfuscate` is true
+    // (same flag as the Overview / enhance-mode obfuscation switch); `json_to_wg_config` reads that.
+    WireGuardApi::enable_interference_detection(handle, state.enhance_mode.obfuscate);
 
     let endpoint = config
         .lines()

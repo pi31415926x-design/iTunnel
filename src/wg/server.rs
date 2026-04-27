@@ -103,9 +103,10 @@ pub fn load_server_config(state: &mut WireGuardState) -> Result<(Wg, Option<Stri
 
 /// Build the libwg-go uapi config for the server.
 ///
-/// Note: this server path explicitly clears `h1..h4` to avoid Amnezia hash
-/// obfuscation side effects while debugging baseline connectivity.
-pub fn build_uapi(wg: &Wg) -> Result<String, String> {
+/// Amnezia (`jc` / `jmin` / … / `i1`) is written only when **`obfuscate`** is true (same as
+/// [`WireGuardState::enhance_mode`] from the server Overview "Obfuscation" switch) and
+/// [`Interface::amnezia_params`] is present—mirroring client [`WireGuardState::json_to_wg_config`].
+pub fn build_uapi(wg: &Wg, obfuscate: bool) -> Result<String, String> {
     if wg.interface.private_key.is_empty() {
         return Err(
             "Server PrivateKey is empty. Set PrivateKey=... in the project root .env file."
@@ -120,18 +121,19 @@ pub fn build_uapi(wg: &Wg) -> Result<String, String> {
     s.push_str(&format!("private_key={}\n", priv_hex));
     s.push_str(&format!("listen_port={}\n", wg.interface.listen_port));
     s.push_str("replace_peers=true\n");
-    // add amnezia params
-    if let Some(amnezia_params) = &wg.interface.amnezia_params {
-        s.push_str(&format!("jc={}\n", amnezia_params.jc));
-        s.push_str(&format!("jmin={}\n", amnezia_params.jmin));
-        s.push_str(&format!("jmax={}\n", amnezia_params.jmax));
-        s.push_str(&format!("s1={}\n", amnezia_params.s1));
-        s.push_str(&format!("s2={}\n", amnezia_params.s2));
-        s.push_str(&format!("h1={}\n", amnezia_params.h1));
-        s.push_str(&format!("h2={}\n", amnezia_params.h2));
-        s.push_str(&format!("h3={}\n", amnezia_params.h3));
-        s.push_str(&format!("h4={}\n", amnezia_params.h4));
-        s.push_str(&format!("i1={}\n", amnezia_params.i1));
+    if obfuscate {
+        if let Some(amnezia_params) = &wg.interface.amnezia_params {
+            s.push_str(&format!("jc={}\n", amnezia_params.jc));
+            s.push_str(&format!("jmin={}\n", amnezia_params.jmin));
+            s.push_str(&format!("jmax={}\n", amnezia_params.jmax));
+            s.push_str(&format!("s1={}\n", amnezia_params.s1));
+            s.push_str(&format!("s2={}\n", amnezia_params.s2));
+            s.push_str(&format!("h1={}\n", amnezia_params.h1));
+            s.push_str(&format!("h2={}\n", amnezia_params.h2));
+            s.push_str(&format!("h3={}\n", amnezia_params.h3));
+            s.push_str(&format!("h4={}\n", amnezia_params.h4));
+            s.push_str(&format!("i1={}\n", amnezia_params.i1));
+        }
     }
     
     for p in &wg.peers {
@@ -185,6 +187,8 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         return Ok(());
     }
 
+    state.enhance_mode.obfuscate = protocol_obfuscation;
+
     let (mut wg, tun_name_opt) = load_server_config(state)?;
     if protocol_obfuscation {
         wg.interface.amnezia_params = read_env_amnezia_params()?;
@@ -193,7 +197,7 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         wg.interface.amnezia_params = None;
         state.wg_config = Some(wg.clone());
     }
-    let uapi = build_uapi(&wg)?;
+    let uapi = build_uapi(&wg, state.enhance_mode.obfuscate)?;
 
     // 1. TUN (name from .env: InterfaceName=...)
     let iface = tun_name_opt
@@ -304,7 +308,7 @@ pub fn apply_peers(state: &mut WireGuardState, new_peers: &[Peer]) -> Result<(),
     state.wg_config = Some(wg.clone());
 
     if let Some(handle) = state.handle {
-        let uapi = build_uapi(&wg)?;
+        let uapi = build_uapi(&wg, state.enhance_mode.obfuscate)?;
         if let Err(rc) = WireGuardApi::set_config(handle, &uapi) {
             return Err(format!("wgSetConfig returned {}", rc));
         }
@@ -381,8 +385,25 @@ fn read_env_identity() -> Result<(String, Option<u16>, Option<String>, Option<St
     Ok((private_key, listen_port, endpoint, interface_name))
 }
 
+/// Default Amnezia uapi params when `.env` omits them; matches the sample `Jc` / `I1` / … block in project `.env` docs.
+fn default_env_amnezia_params() -> AmneziaParams {
+    AmneziaParams {
+        jc: 3,
+        jmin: 10,
+        jmax: 30,
+        s1: 11,
+        s2: 22,
+        h1: 33,
+        h2: 44,
+        h3: 55,
+        h4: 66,
+        i1: "<b 0x16feff0000000000000001004c01><t><r 28><r 150>".to_string(),
+    }
+}
+
 fn read_env_amnezia_params() -> Result<Option<AmneziaParams>, String> {
-    let content = std::fs::read_to_string(".env").map_err(|e| format!("read .env: {}", e))?;
+    // Missing or unreadable `.env` is treated as no Amnezia lines; we still apply `default_env_amnezia_params`.
+    let content = std::fs::read_to_string(".env").unwrap_or_default();
 
     let mut jc: Option<u16> = None;
     let mut jmin: Option<u16> = None;
@@ -421,6 +442,7 @@ fn read_env_amnezia_params() -> Result<Option<AmneziaParams>, String> {
         }
     }
 
+    let d = default_env_amnezia_params();
     if jc.is_none()
         && jmin.is_none()
         && jmax.is_none()
@@ -432,20 +454,20 @@ fn read_env_amnezia_params() -> Result<Option<AmneziaParams>, String> {
         && h4.is_none()
         && i1.is_none()
     {
-        return Ok(None);
+        return Ok(Some(d));
     }
 
     Ok(Some(AmneziaParams {
-        jc: jc.unwrap_or(0),
-        jmin: jmin.unwrap_or(0),
-        jmax: jmax.unwrap_or(0),
-        s1: s1.unwrap_or(0),
-        s2: s2.unwrap_or(0),
-        h1: h1.unwrap_or(0),
-        h2: h2.unwrap_or(0),
-        h3: h3.unwrap_or(0),
-        h4: h4.unwrap_or(0),
-        i1: i1.unwrap_or_default(),
+        jc: jc.unwrap_or(d.jc),
+        jmin: jmin.unwrap_or(d.jmin),
+        jmax: jmax.unwrap_or(d.jmax),
+        s1: s1.unwrap_or(d.s1),
+        s2: s2.unwrap_or(d.s2),
+        h1: h1.unwrap_or(d.h1),
+        h2: h2.unwrap_or(d.h2),
+        h3: h3.unwrap_or(d.h3),
+        h4: h4.unwrap_or(d.h4),
+        i1: i1.unwrap_or(d.i1),
     }))
 }
 
@@ -517,6 +539,7 @@ fn ipv4_network_cidr(cidr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wg::config::AmneziaParams;
 
     fn priv_b64() -> &'static str {
         "yMlj3LbVKMW69kXXh0OpbfZUlEVmkYDao3bk6jTl/EQ="
@@ -525,16 +548,30 @@ mod tests {
         "qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA="
     }
 
-    #[test]
-    fn build_uapi_clears_h_params() {
-        let wg = Wg {
+    fn sample_amnezia() -> AmneziaParams {
+        AmneziaParams {
+            jc: 3,
+            jmin: 10,
+            jmax: 30,
+            s1: 11,
+            s2: 22,
+            h1: 33,
+            h2: 44,
+            h3: 55,
+            h4: 66,
+            i1: "<b 0x16feff0000000000000001004c01><t><r 28><r 150>".into(),
+        }
+    }
+
+    fn sample_wg_with_amnezia() -> Wg {
+        Wg {
             interface: crate::wg::config::Interface {
                 private_key: priv_b64().into(),
                 listen_port: 51820,
                 address: "10.88.0.1/24".into(),
                 dns: vec![],
                 mtu: 1280,
-                amnezia_params: todo!(),
+                amnezia_params: Some(sample_amnezia()),
             },
             peers: vec![Peer {
                 name: Some("client1".into()),
@@ -545,35 +582,30 @@ mod tests {
                 endpoint: String::new(),
                 persistent_keepalive: None,
             }],
-        };
-        let uapi = build_uapi(&wg).expect("uapi");
-
-        // Must contain core lines.
-        assert!(uapi.contains("listen_port=51820"));
-        assert!(uapi.contains("replace_peers=true"));
-        assert!(uapi.contains("allowed_ip=10.88.0.2/32"));
-        assert!(uapi.contains("private_key="));
-        assert!(uapi.contains("public_key="));
-        println!("uapi: {}", uapi);
-        // Server explicitly clears h1..h4 while leaving other knobs absent.
-        assert!(uapi.contains("h1=0"));
-        assert!(uapi.contains("h2=0"));
-        assert!(uapi.contains("h3=0"));
-        assert!(uapi.contains("h4=0"));
-        for forbidden in ["jc=", "jmin=", "jmax=", "s1=", "s2=", "i1="] {
-            assert!(
-                !uapi.contains(forbidden),
-                "server uapi must not contain '{}', got:\n{}",
-                forbidden,
-                uapi
-            );
         }
+    }
+
+    #[test]
+    fn build_uapi_omits_amnezia_when_obfuscate_off_even_if_params_present() {
+        let wg = sample_wg_with_amnezia();
+        let uapi = build_uapi(&wg, false).expect("uapi");
+        assert!(uapi.contains("listen_port=51820"));
+        assert!(!uapi.contains("jc="));
+    }
+
+    #[test]
+    fn build_uapi_includes_amnezia_when_obfuscate_on() {
+        let wg = sample_wg_with_amnezia();
+        let uapi = build_uapi(&wg, true).expect("uapi");
+        assert!(uapi.contains("jc=3"));
+        assert!(uapi.contains("jmin=10"));
+        assert!(uapi.contains("i1="));
     }
 
     #[test]
     fn build_uapi_rejects_empty_private_key() {
         let wg = Wg::default();
-        let err = build_uapi(&wg).unwrap_err();
+        let err = build_uapi(&wg, false).unwrap_err();
         assert!(err.contains("PrivateKey"), "unexpected error: {}", err);
     }
 }

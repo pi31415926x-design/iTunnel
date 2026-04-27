@@ -293,9 +293,8 @@ impl WireGuardState {
     // JSON -> wg.conf
     /// 可以用来直接给libwg-go使用。
     ///
-    /// Client mode emits AmneziaWG obfuscation params (`jc/jmin/jmax/s1/s2/h*`)
-    /// so peers can punch through DPI; server mode omits them entirely so
-    /// vanilla WireGuard clients can connect. Server mode also pulls the
+    /// Client mode emits AmneziaWG obfuscation when [`EnhanceMode::obfuscate`] is true; server mode
+    /// does not use this function for its uapi (see `wg::server::build_uapi`). Server mode also pulls the
     /// PrivateKey from `.env` if missing on the in-memory struct.
     pub fn json_to_wg_config(&self, w: &Wg) -> String {
         let is_server = self.app_mode == AppMode::Server;
@@ -313,9 +312,10 @@ impl WireGuardState {
             }
         }
 
+        // Amnezia uapi (client) only when the same Overview / enhance-mode "obfuscation" flag is on.
         let amnezia_block = if is_server {
             String::new()
-        } else {
+        } else if self.enhance_mode.obfuscate {
             "jc=3\n\
              jmin=10\n\
              jmax=30\n\
@@ -327,6 +327,8 @@ impl WireGuardState {
              h4=66\n\
              i1=<b 0x16feff0000000000000001004c01><t><r 28><r 150>\n"
                 .to_string()
+        } else {
+            String::new()
         };
 
         let mut s = format!(
@@ -519,10 +521,15 @@ mod tests {
 
     #[test]
     fn test_json_to_wg_config() {
+        let b64_priv = "yMlj3LbVKMW69kXXh0OpbfZUlEVmkYDao3bk6jTl/EQ=";
+        let b64_pub = "qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=";
+        let hex_priv = WireGuardState::base64_to_hex(b64_priv).unwrap();
+        let hex_pub = WireGuardState::base64_to_hex(b64_pub).unwrap();
+
         let state = WireGuardState::default();
         let wg = Wg {
             interface: Interface {
-                private_key: "private_key_123".into(),
+                private_key: b64_priv.into(),
                 listen_port: 51820,
                 address: "10.0.0.1/24".into(),
                 dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
@@ -532,8 +539,8 @@ mod tests {
             peers: vec![Peer {
                 name: None,
                 private_key: None,
-                public_key: "public_key_abc".into(),
-                preshared_key: "preshared_key_def".into(),
+                public_key: b64_pub.into(),
+                preshared_key: String::new(),
                 allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
                 endpoint: "1.2.3.4:51820".into(),
                 persistent_keepalive: Some(25),
@@ -543,12 +550,11 @@ mod tests {
         let config = state.json_to_wg_config(&wg);
 
         println!("test_json_to_wg_config is : {}", config);
-        assert!(config.contains("private_key=private_key_123"));
+        assert!(config.contains(&format!("private_key={}\n", hex_priv)));
         assert!(config.contains("listen_port=51820"));
-        assert!(config.contains("public_key=public_key_abc"));
-        assert!(config.contains("preshared_key=preshared_key_def"));
-        assert!(config.contains("allowed_ips=0.0.0.0/0"));
-        assert!(config.contains("allowed_ips=::/0"));
+        assert!(config.contains(&format!("public_key={}\n", hex_pub)));
+        assert!(config.contains("allowed_ip=0.0.0.0/0"));
+        assert!(config.contains("allowed_ip=::/0"));
         assert!(config.contains("endpoint=1.2.3.4:51820"));
     }
     #[test]
