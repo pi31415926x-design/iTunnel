@@ -1,3 +1,10 @@
+//! Windows: use the GUI subsystem so the built `.exe` does not spawn a console (black) window.
+//! Debug builds still use the console for `eprintln!` / `cargo run` logging.
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
 use actix_web::{web, App, HttpServer, HttpResponse};
 use rust_embed::RustEmbed;
 use itunnel::{api::{local_api, server_local_api}, logging, wg::config::WireGuardState};

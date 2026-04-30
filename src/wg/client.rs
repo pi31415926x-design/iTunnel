@@ -243,12 +243,12 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
             ("10.99.0.0", "255.255.0.0"),
         ];
         for (dest, mask) in routes {
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&["DELETE", dest, "MASK", mask])
                 .output();
         }
         if !endpoint_ip.is_empty() {
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&["DELETE", endpoint_ip])
                 .output();
         }
@@ -384,7 +384,7 @@ fn get_gateway_for_ip(target: &str) -> std::io::Result<String> {
 
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("powershell")
+        let output = crate::command_ext::command_new("powershell")
             .args(&["-Command", "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -ExpandProperty NextHop"])
             .output()?;
         if !output.status.success() {
@@ -575,7 +575,7 @@ fn configure_network(
                 .split('/')
                 .next()
                 .unwrap_or("");
-            let _ = std::process::Command::new("netsh")
+            let _ = crate::command_ext::command_new("netsh")
                 .args(&[
                     "interface",
                     "ip",
@@ -588,7 +588,7 @@ fn configure_network(
                 ])
                 .output()?;
 
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&[
                     "ADD",
                     "10.99.0.0",
@@ -599,7 +599,7 @@ fn configure_network(
                     interface_name,
                 ])
                 .output()?;
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&[
                     "ADD",
                     "0.0.0.0",
@@ -610,7 +610,7 @@ fn configure_network(
                     interface_name,
                 ])
                 .output()?;
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&[
                     "ADD",
                     "128.0.0.0",
@@ -624,7 +624,7 @@ fn configure_network(
         }
 
         if !endpoint_ip.is_empty() {
-            let _ = std::process::Command::new("route")
+            let _ = crate::command_ext::command_new("route")
                 .args(&["ADD", endpoint_ip, "MASK", "255.255.255.255", gateway])
                 .output()?;
         }

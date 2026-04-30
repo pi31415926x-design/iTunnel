@@ -1,4 +1,5 @@
 use log::{debug, error, info};
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
@@ -155,7 +156,7 @@ fn get_default_interface() -> std::io::Result<String> {
     #[cfg(target_os = "windows")]
     {
         let ps_cmd = "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric)[0].InterfaceAlias";
-        let output = Command::new("powershell")
+        let output = crate::command_ext::command_new("powershell")
             .args(&["-Command", ps_cmd])
             .output()?;
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
@@ -190,7 +191,7 @@ fn get_interface_ip(_iface: &str) -> std::io::Result<String> {
             "(Get-NetIPAddress -InterfaceAlias '{}' -AddressFamily IPv4).IPAddress",
             _iface
         );
-        let output = Command::new("powershell")
+        let output = crate::command_ext::command_new("powershell")
             .args(&["-Command", &ps_cmd])
             .output()?;
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
@@ -214,7 +215,16 @@ fn set_sysctl(name: &str, value: &str) -> std::io::Result<()> {
 
 fn run_command(cmd: &str, args: &[&str]) -> std::io::Result<()> {
     debug!("Running command: {} {:?}", cmd, args);
-    let output = Command::new(cmd).args(args).output()?;
+    let output = {
+        #[cfg(target_os = "windows")]
+        {
+            crate::command_ext::command_new(cmd).args(args).output()?
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new(cmd).args(args).output()?
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
