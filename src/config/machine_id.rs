@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// 获取机器唯一标识 (UUID)
@@ -27,7 +27,7 @@ pub fn get_machine_id() -> Result<String, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("powershell")
+        let output = crate::command_ext::command_new("powershell")
             .args(&[
                 "-Command",
                 "(Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID",
