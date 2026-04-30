@@ -88,13 +88,13 @@ fn http_url_for_local_browser(addr: IpAddr, port: u16) -> String {
 // ========== Parse CLI Arguments ==========
 struct StartupOptions {
     app_mode: itunnel::wg::config::AppMode,
-    /// No Tauri window / tray; only Actix. See `parse_startup_options` for how this is set.
+    /// `true`: no Tauri (no GTK tray/window on Linux), only Actix. See `parse_startup_options`.
     headless: bool,
 }
 
-/// Mode is chosen by the last of `-s` / `--server` / `-c` / `--client`. With `--server` or
-/// `--client` present, default is no GUI; add `--gui` for the tray+window Tauri app. No mode flag
-/// keeps the default: Client + Tauri.
+/// `app_mode` from the last of `-s` / `--server` / `-c` / `--client` (default client if none).
+/// **Tauri** runs when there is **no** mode flag (`itunnel` alone → client + tray) or when `--gui`
+/// is passed (`-s --gui`, `-c --gui`, …). **Headless** (`-s` / `-c` without `--gui`) is Actix only.
 fn parse_startup_options() -> StartupOptions {
     let args: Vec<String> = std::env::args().collect();
     let mut app_mode = itunnel::wg::config::AppMode::Client;
