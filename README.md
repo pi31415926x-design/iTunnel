@@ -5,13 +5,16 @@
 
 | 命令 | 模式 | GUI |
 |------|------|-----|
-| `itunnel --server` | Server | 否（仅 Actix） |
-| `itunnel --server --gui` | Server | 是（托盘） |
-| `itunnel --client` 或 `-c` | Client | 否 |
+| `itunnel`（无 `-s`/`-c`） | Client | 是（默认托盘） |
+| `itunnel --gui` | Client | 是 |
+| `itunnel --client` 或 `-c` | Client | 否（仅 Actix，无 Tauri） |
 | `itunnel --client --gui` | Client | 是 |
-| `itunnel`（无 `--server` / `--client`） | Client | 是（默认） |
+| `itunnel --server` 或 `-s` | Server | 否 |
+| `itunnel --server --gui` | Server | 是 |
 
-无 GUI 时只跑 Actix（与 Ctrl+C 清理），不启动 Tauri。
+**headless**：无 Tauri、无系统托盘/原生窗口，只跑 Actix（Web/API）+ Ctrl+C 清理；适合服务器或无图形环境。代码里用字段名 `headless` 表示这种状态。
+
+无 GUI（headless）时只跑 Actix，不启动 Tauri（Linux 上不初始化 GTK）。
 
 ```bash
 cargo run -- --server
@@ -26,7 +29,7 @@ cargo run -- --client --gui
 ### 实现要点
 
 1. **`parse_startup_options()`**  
-   解析 `app_mode`（`-s` / `--server` / `-c` / `--client`，后出现者覆盖先出现者）与 `--gui`。有模式标志且无 `--gui` 时 `headless == true`。
+   解析 `app_mode`（`-s` / `--server` / `-c` / `--client`，后出现者覆盖先出现者；无模式旗标则默认 client）与 `--gui`。出现 `-s`/`-c` 且未传 `--gui` 时 `headless == true`；无参数或带 `--gui` 时启用 Tauri。
 
 2. **`headless == true` 时**  
    在构建 `tauri::Builder` 之前返回：只做日志、状态、Ctrl+C 线程，然后 `spawn_actix_background`，主线程用 `mpsc::recv()` 阻塞直到收到信号。
