@@ -5,7 +5,8 @@
 //! 1. Build a server [`Wg`] by combining the on-disk peer list
 //!    (`~/.itunnel/itunnel_peers.json`) with the operator-supplied identity
 //!    in `.env` (`PrivateKey=...`, `InterfaceName=...` for the TUN device name,
-//!    optional `ListenPort=...`, optional `Endpoint=...`).
+//!    `Endpoint=host:port` or `Endpoint=[ipv6]:port` for the public UDP listen port,
+//!    optional fallback `ListenPort=...` when Endpoint has no `:port`).
 //! 2. Translate that into a clean uapi config (no AmneziaWG params) suitable
 //!    for vanilla WireGuard peers.
 //! 3. Drive the lifecycle: create a TUN device via [`crate::wg::tun`], assign
@@ -34,6 +35,7 @@ use crate::wg::config::{AmneziaParams, AppMode, ConnectionStatus, Peer, Wg, Wire
 use crate::wg::tun::TunDevice;
 use crate::wg::WireGuardApi;
 use log::{info, debug, warn};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::Ipv4Addr;
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -42,6 +44,35 @@ use std::process::Command;
 /// (matches what client mode uses). Operators can override via the INI
 /// `MTU =` field once we add INI loading.
 const DEFAULT_SERVER_MTU: u16 = 1280;
+
+/// On Linux, a bare IPv4 in `Interface.Address` (e.g. `10.88.0.1`) becomes
+/// `/32` in `TunDevice` address configuration, which stacks badly with
+/// a `/24` VPN subnet (`10.88.0.1/24` appearing twice under one interface) and
+/// can provoke TUN `write()` errors (`EDESTADDRREQ`, drops). Normalize to `/24`
+/// when no prefix was given so one `ip addr add X/24 dev …` wins.
+#[cfg(target_os = "linux")]
+fn normalize_linux_server_tunnel_address_list(input: &str) -> String {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|part| {
+            if part.contains('/') {
+                return part.to_string();
+            }
+            if part.parse::<Ipv4Addr>().is_ok() {
+                return format!("{part}/24");
+            }
+            part.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn normalize_linux_server_tunnel_address_list(input: &str) -> String {
+    input.to_string()
+}
 
 /// Entry point: load .env + peers.json into `state.wg_config`, ensuring the
 /// server's interface address / private key / listen port are populated.
@@ -66,20 +97,24 @@ pub fn load_server_config(state: &mut WireGuardState) -> Result<(Wg, Option<Stri
     // Pull operator identity from .env; non-fatal if missing so the WebUI
     // can still render peer management views. `InterfaceName` is always
     // parsed when the file is readable.
+    //
+    // WireGuard `listen_port` matches the UDP port clients use, so it is taken
+    // from `Endpoint=...:port` when present; otherwise `ListenPort=`, then 51820.
     match read_env_identity() {
         Ok((pk, port_opt, endpoint_opt, ifn)) => {
             interface_name = ifn.filter(|s| !s.is_empty());
-            if wg.interface.private_key.is_empty() || wg.interface.listen_port == 0 {
-                if !pk.is_empty() && wg.interface.private_key.is_empty() {
-                    wg.interface.private_key = pk;
+            if let Some(ep) = endpoint_opt {
+                state.active_endpoint = Some(ep.clone());
+                if let Some(p) = port_from_endpoint(&ep) {
+                    wg.interface.listen_port = p;
                 }
-                if let Some(port) = port_opt {
-                    if wg.interface.listen_port == 0 {
-                        wg.interface.listen_port = port;
-                    }
-                }
-                if let Some(ep) = endpoint_opt {
-                    state.active_endpoint = Some(ep);
+            }
+            if !pk.is_empty() && wg.interface.private_key.is_empty() {
+                wg.interface.private_key = pk;
+            }
+            if wg.interface.listen_port == 0 {
+                if let Some(p) = port_opt {
+                    wg.interface.listen_port = p;
                 }
             }
         }
@@ -116,6 +151,11 @@ pub fn build_uapi(wg: &Wg) -> Result<String, String> {
     let priv_hex = base64_to_hex(&wg.interface.private_key)
         .map_err(|e| format!("Server PrivateKey decode failed: {}", e))?;
 
+    let mtu = if wg.interface.mtu == 0 {
+        DEFAULT_SERVER_MTU
+    } else {
+        wg.interface.mtu
+    };
     let mut s = String::new();
     s.push_str(&format!("private_key={}\n", priv_hex));
     s.push_str(&format!("listen_port={}\n", wg.interface.listen_port));
@@ -153,11 +193,8 @@ pub fn build_uapi(wg: &Wg) -> Result<String, String> {
                 s.push_str(&format!("allowed_ip={}\n", ip.trim()));
             }
         }
-        // Server peers are typically roaming clients; an Endpoint is optional
-        // and only meaningful as a persistent override.
-        if !p.endpoint.is_empty() {
-            s.push_str(&format!("endpoint={}\n", p.endpoint));
-        }
+        // Never emit `endpoint=` in server mode: roaming clients negotiate address
+        // from incoming UDP only; persisted peer.endpoint may still exist in UI/JSON for display/export.
         if let Some(ka) = p.persistent_keepalive {
             if ka > 0 {
                 s.push_str(&format!("persistent_keepalive_interval={}\n", ka));
@@ -213,46 +250,95 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
     let tun = TunDevice::create(&iface, mtu)
         .map_err(|e| format!("Create TUN '{}' failed: {}", iface, e))?;
 
-    if let Err(e) = tun.configure_address(&wg.interface.address) {
-        let _ = tun.close();
-        return Err(format!(
-            "Configure {} on {} failed: {}",
-            wg.interface.address, iface, e
-        ));
-    }
-    if let Err(e) = ensure_server_routes(&iface, &wg.interface.address) {
-        warn!("Failed to ensure server routes on {}: {}", iface, e);
-    }
+    let tunnel_addrs = normalize_linux_server_tunnel_address_list(&wg.interface.address);
 
-    let fd = tun.fd;
-    state.tun_fd = Some(fd);
-
-    debug!("uapi: {}", uapi);
-    // 2. Hand to libwg-go.
-    let handle = match WireGuardApi::turn_on(&uapi, fd) {
-        Ok(h) => h,
-        Err(e) => {
-            // libwg-go assumes ownership of the fd ONLY on success; close it
-            // here. NB: do not call tun.close() because that would also try
-            // to close it again. Fall back to the raw libc close.
-            unsafe { libc::close(fd) };
+    #[cfg(target_os = "linux")]
+    {
+        // Let libwg-go call `setMTU` on a pristine tun fd first; then add addresses and `ip link`.
+        let fd = tun.fd;
+        state.tun_fd = Some(fd);
+        debug!("uapi: {}", uapi);
+        let handle = match WireGuardApi::turn_on(&uapi, fd) {
+            Ok(h) => h,
+            Err(e) => {
+                unsafe { libc::close(fd) };
+                state.tun_fd = None;
+                state.status = ConnectionStatus::Error;
+                return Err(format!("wgTurnOn failed: {}", e));
+            }
+        };
+        if let Err(e) = tun.configure_address(&tunnel_addrs) {
+            WireGuardApi::turn_off(handle);
             state.tun_fd = None;
             state.status = ConnectionStatus::Error;
-            return Err(format!("wgTurnOn failed: {}", e));
+            return Err(format!(
+                "Configure {} on {} failed: {}",
+                tunnel_addrs, iface, e
+            ));
         }
-    };
+        if let Err(e) = tun.linux_apply_mtu_up(mtu) {
+            warn!(
+                "Post-wgTurnOn ip link mtu/up on {} failed (tunnel may use default link state): {}",
+                iface, e
+            );
+        }
+        if let Err(e) = ensure_server_routes(&iface, &tunnel_addrs) {
+            warn!("Failed to ensure server routes on {}: {}", iface, e);
+        }
+        state.handle = Some(handle);
+        state.status = ConnectionStatus::Connected;
+        info!(
+            "✅ WireGuard server up: iface={}, listen={}, peers={}, handle={}",
+            iface,
+            wg.interface.listen_port,
+            wg.peers.len(),
+            handle
+        );
+        return Ok(());
+    }
 
-    state.handle = Some(handle);
-    state.status = ConnectionStatus::Connected;
-    info!(
-        "✅ WireGuard server up: iface={}, listen={}, peers={}, handle={}",
-        iface,
-        wg.interface.listen_port,
-        wg.peers.len(),
-        handle
-    );
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Err(e) = tun.configure_address(&tunnel_addrs) {
+            let _ = tun.close();
+            return Err(format!(
+                "Configure {} on {} failed: {}",
+                tunnel_addrs, iface, e
+            ));
+        }
+        if let Err(e) = ensure_server_routes(&iface, &tunnel_addrs) {
+            warn!("Failed to ensure server routes on {}: {}", iface, e);
+        }
 
-    Ok(())
+        let fd = tun.fd;
+        state.tun_fd = Some(fd);
+
+        debug!("uapi: {}", uapi);
+        // 2. Hand to libwg-go.
+        let handle = match WireGuardApi::turn_on(&uapi, fd) {
+            Ok(h) => h,
+            Err(e) => {
+                // libwg-go assumes ownership of the fd ONLY on success; close it
+                // here. NB: do not call tun.close() because that would also try
+                // to close it again. Fall back to the raw libc close.
+                unsafe { libc::close(fd) };
+                state.tun_fd = None;
+                state.status = ConnectionStatus::Error;
+                return Err(format!("wgTurnOn failed: {}", e));
+            }
+        };
+
+        state.handle = Some(handle);
+        state.status = ConnectionStatus::Connected;
+        info!(
+            "✅ WireGuard server up: iface={}, listen={}, peers={}, handle={}",
+            iface,
+            wg.interface.listen_port,
+            wg.peers.len(),
+            handle
+        );
+        Ok(())
+    }
 }
 
 /// Stop the WireGuard server: turn off libwg-go, close TUN.
@@ -323,6 +409,20 @@ pub fn apply_peers(state: &mut WireGuardState, new_peers: &[Peer]) -> Result<(),
 // place). Backward compatible with the existing layout in main.rs.
 // ---------------------------------------------------------------------------
 
+/// UDP port suffix from `.env` `Endpoint` (`1.2.3.4:51820`, `host:51820`, `[::1]:51820`).
+fn port_from_endpoint(endpoint: &str) -> Option<u16> {
+    let e = endpoint.trim();
+    if e.is_empty() {
+        return None;
+    }
+    let port_str = if let Some(rest) = e.strip_prefix('[') {
+        rest.split_once("]:")?.1
+    } else {
+        e.rsplit_once(':')?.1
+    };
+    port_str.parse().ok()
+}
+
 fn read_env_identity() -> Result<(String, Option<u16>, Option<String>, Option<String>), String> {
     let content = match std::fs::read_to_string(".env") {
         Ok(c) => c,
@@ -361,14 +461,6 @@ fn read_env_identity() -> Result<(String, Option<u16>, Option<String>, Option<St
             "Endpoint" => {
                 if !v.is_empty() {
                     endpoint = Some(v.to_string());
-                    // Endpoint of the form host:port also gives us the listen port.
-                    if listen_port.is_none() {
-                        if let Some(port_str) = v.rsplit(':').next() {
-                            if let Ok(p) = port_str.parse::<u16>() {
-                                listen_port = Some(p);
-                            }
-                        }
-                    }
                 }
             }
             _ => {}
@@ -526,6 +618,15 @@ mod tests {
     }
 
     #[test]
+    fn port_from_endpoint_parses_host_and_ipv6() {
+        assert_eq!(port_from_endpoint("203.0.113.7:51820"), Some(51820));
+        assert_eq!(port_from_endpoint("vpn.example.com:41194"), Some(41194));
+        assert_eq!(port_from_endpoint("[2001:db8::1]:51820"), Some(51820));
+        assert_eq!(port_from_endpoint("no-port"), None);
+        assert_eq!(port_from_endpoint(""), None);
+    }
+
+    #[test]
     fn build_uapi_clears_h_params() {
         let wg = Wg {
             interface: crate::wg::config::Interface {
@@ -534,7 +635,7 @@ mod tests {
                 address: "10.88.0.1/24".into(),
                 dns: vec![],
                 mtu: 1280,
-                amnezia_params: todo!(),
+                amnezia_params: None,
             },
             peers: vec![Peer {
                 name: Some("client1".into()),
@@ -549,18 +650,13 @@ mod tests {
         let uapi = build_uapi(&wg).expect("uapi");
 
         // Must contain core lines.
-        assert!(uapi.contains("listen_port=51820"));
+        assert!(uapi.contains("listen_port=61820"));
         assert!(uapi.contains("replace_peers=true"));
         assert!(uapi.contains("allowed_ip=10.88.0.2/32"));
         assert!(uapi.contains("private_key="));
         assert!(uapi.contains("public_key="));
         println!("uapi: {}", uapi);
-        // Server explicitly clears h1..h4 while leaving other knobs absent.
-        assert!(uapi.contains("h1=0"));
-        assert!(uapi.contains("h2=0"));
-        assert!(uapi.contains("h3=0"));
-        assert!(uapi.contains("h4=0"));
-        for forbidden in ["jc=", "jmin=", "jmax=", "s1=", "s2=", "i1="] {
+        for forbidden in ["jc=", "jmin=", "jmax=", "s1=", "s2=", "h1=", "h2=", "h3=", "h4=", "i1="] {
             assert!(
                 !uapi.contains(forbidden),
                 "server uapi must not contain '{}', got:\n{}",
@@ -568,6 +664,60 @@ mod tests {
                 uapi
             );
         }
+    }
+
+    #[test]
+    fn build_uapi_omits_peer_endpoint() {
+        let wg = Wg {
+            interface: crate::wg::config::Interface {
+                private_key: priv_b64().into(),
+                listen_port: 51820,
+                address: "10.88.0.1/24".into(),
+                dns: vec![],
+                mtu: 1280,
+                amnezia_params: None,
+            },
+            peers: vec![Peer {
+                name: Some("c".into()),
+                private_key: None,
+                public_key: pub_b64().into(),
+                preshared_key: String::new(),
+                allowed_ips: vec!["10.88.0.2/32".into()],
+                endpoint: "192.168.6.103:61820".into(),
+                persistent_keepalive: Some(25),
+            }],
+        };
+        let uapi = build_uapi(&wg).expect("uapi");
+        assert!(
+            !uapi.contains("endpoint="),
+            "server uapi must not contain peer endpoint=, got:\n{}",
+            uapi
+        );
+        assert!(
+            uapi.contains("persistent_keepalive_interval="),
+            "expected keepalive in uapi"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn normalize_tunnel_addr_bare_ipv4_appends_slash24() {
+        assert_eq!(
+            super::normalize_linux_server_tunnel_address_list("10.88.0.1"),
+            "10.88.0.1/24"
+        );
+        assert_eq!(
+            super::normalize_linux_server_tunnel_address_list("10.88.0.1/24"),
+            "10.88.0.1/24"
+        );
+        assert_eq!(
+            super::normalize_linux_server_tunnel_address_list("10.88.0.1/32"),
+            "10.88.0.1/32"
+        );
+        assert_eq!(
+            super::normalize_linux_server_tunnel_address_list("fd00::1"),
+            "fd00::1"
+        );
     }
 
     #[test]

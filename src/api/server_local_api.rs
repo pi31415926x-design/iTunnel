@@ -7,6 +7,7 @@
 //! 3. Hot-reloads the running tunnel via `wg::server::apply_peers`.
 //! 4. Exposes start/stop/status to the WebUI.
 
+use crate::api::local_api::endpoint_routes;
 use crate::wg::config::{ConnectionStatus, Peer, Protocol, WireGuardState};
 use crate::wg::{server as wg_server, store};
 use actix_web::{get, post, web, HttpResponse, Responder};
@@ -387,6 +388,7 @@ pub async fn stop_server_handler(state: web::Data<Mutex<WireGuardState>>) -> imp
 }
 
 pub fn server_routes(cfg: &mut web::ServiceConfig) {
+    endpoint_routes(cfg);
     cfg.service(generate_peer_handler)
         .service(add_peer_handler)
         .service(update_peer_handler)

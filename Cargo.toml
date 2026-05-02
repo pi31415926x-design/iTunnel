@@ -7,6 +7,8 @@ license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+# Required so Cargo sets OUT_DIR for `tauri::generate_context!()` and runs `tauri_build::build()`.
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

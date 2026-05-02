@@ -1,6 +1,6 @@
 use crate::api::remote_api::{SubscribeRequest, SubscriptionPlan};
 use crate::speedtest;
-use crate::wg::config::{parse_wg_ini, ConnectionStatus, WgConfigPayload, WireGuardState};
+use crate::wg::config::{parse_wg_ini, AppMode, ConnectionStatus, WgConfigPayload, WireGuardState};
 use crate::wg::WireGuardApi;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use log::{debug, error, info};
@@ -621,12 +621,25 @@ fn parse_uapi_config(raw: &str) -> serde_json::Value {
     })
 }
 
+/// Remove `endpoint` from each peer in `config_readable` (server mode only).
+/// Live `wgGetConfig` still reports learned peer addresses; we do not expose them via this API.
+fn strip_peer_endpoints_from_readable(mut parsed: serde_json::Value) -> serde_json::Value {
+    if let Some(peers) = parsed.get_mut("peers").and_then(|p| p.as_array_mut()) {
+        for peer in peers.iter_mut() {
+            if let Some(obj) = peer.as_object_mut() {
+                obj.remove("endpoint");
+            }
+        }
+    }
+    parsed
+}
+
 /// Live uapi-style config from libwg-go (`wgGetConfig`). Works in client and
 /// server mode whenever `state.handle` is set.
 #[get("/api/get_wg_config")]
 pub async fn get_wg_config(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let (handle, status) = match state.lock() {
-        Ok(s) => (s.handle, s.status),
+    let (handle, status, app_mode) = match state.lock() {
+        Ok(s) => (s.handle, s.status, s.app_mode),
         Err(e) => {
             error!("Failed to lock state: {}", e);
             return HttpResponse::InternalServerError().body("Internal Server Error");
@@ -636,6 +649,11 @@ pub async fn get_wg_config(state: web::Data<Mutex<WireGuardState>>) -> impl Resp
     if let Some(h) = handle {
         if let Some(config) = WireGuardApi::get_config(h) {
             let parsed = parse_uapi_config(&config);
+            let parsed = if app_mode == AppMode::Server {
+                strip_peer_endpoints_from_readable(parsed)
+            } else {
+                parsed
+            };
             return HttpResponse::Ok().json(serde_json::json!({
                 "status": status,
                 "config_readable": parsed
@@ -946,7 +964,19 @@ pub fn common_routes(cfg: &mut web::ServiceConfig) {
        .service(get_interfaces);
 }
 
+/// Custom endpoint list CRUD (`/api/endpoints`, `/api/add_endpoint`, …).
+/// Mounted in client mode for connect UI and in server mode so operators can
+/// maintain the same persisted list (`~/.itunnel/endpoints.json`) without client-only APIs.
+pub fn endpoint_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(get_endpoints_handler)
+        .service(select_endpoint_handler)
+        .service(add_endpoint_handler)
+        .service(update_endpoint_handler)
+        .service(delete_endpoint_handler);
+}
+
 pub fn client_routes(cfg: &mut web::ServiceConfig) {
+    endpoint_routes(cfg);
     cfg.service(set_wg_config)
        .service(subscribe_plans_handler)
        .service(speed_test_handler)
@@ -958,11 +988,6 @@ pub fn client_routes(cfg: &mut web::ServiceConfig) {
        .service(disconnect_handler)
        .service(switch_node_handler)
        .service(subscribe_req_handler)
-       .service(get_endpoints_handler)
-       .service(select_endpoint_handler)
-       .service(add_endpoint_handler)
-       .service(update_endpoint_handler)
-       .service(delete_endpoint_handler)
        .service(save_enhance_mode_handler)
        .service(get_enhance_mode_handler);
 }
