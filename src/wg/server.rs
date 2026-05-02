@@ -34,7 +34,7 @@
 use crate::wg::config::{AmneziaParams, AppMode, ConnectionStatus, Peer, Wg, WireGuardState};
 use crate::wg::tun::TunDevice;
 use crate::wg::WireGuardApi;
-use log::{info, debug, warn};
+use log::{info, warn};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::Ipv4Addr;
 #[cfg(target_os = "macos")]
@@ -255,21 +255,29 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
     #[cfg(target_os = "linux")]
     {
         // Let libwg-go call `setMTU` on a pristine tun fd first; then add addresses and `ip link`.
-        let fd = tun.fd;
-        state.tun_fd = Some(fd);
-        debug!("uapi: {}", uapi);
-        let handle = match WireGuardApi::turn_on(&uapi, fd) {
+        let session_fd = tun.fd;
+        // Hold a duplicate fd for teardown only. Never close the session fd after a successful
+        // wgTurnOn — libwg-go owns it. Closing the dup after wgTurnOff releases the kernel TUN
+        // if the library left a refcount, without risking close(2) on a recycled fd number.
+        let cleanup_fd = dup_tun_for_teardown(session_fd)?;
+        state.tun_fd = Some(cleanup_fd);
+        log::debug!("uapi: {}", uapi);
+        let handle = match WireGuardApi::turn_on(&uapi, session_fd) {
             Ok(h) => h,
             Err(e) => {
-                unsafe { libc::close(fd) };
-                state.tun_fd = None;
+                close_fd_best_effort("linux wgTurnOn err (session)", session_fd);
+                if let Some(c) = state.tun_fd.take() {
+                    close_fd_best_effort("linux wgTurnOn err (dup)", c);
+                }
                 state.status = ConnectionStatus::Error;
                 return Err(format!("wgTurnOn failed: {}", e));
             }
         };
         if let Err(e) = tun.configure_address(&tunnel_addrs) {
             WireGuardApi::turn_off(handle);
-            state.tun_fd = None;
+            if let Some(c) = state.tun_fd.take() {
+                close_fd_best_effort("linux configure_addr (dup)", c);
+            }
             state.status = ConnectionStatus::Error;
             return Err(format!(
                 "Configure {} on {} failed: {}",
@@ -297,7 +305,7 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         return Ok(());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         if let Err(e) = tun.configure_address(&tunnel_addrs) {
             let _ = tun.close();
@@ -310,19 +318,19 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
             warn!("Failed to ensure server routes on {}: {}", iface, e);
         }
 
-        let fd = tun.fd;
-        state.tun_fd = Some(fd);
+        let session_fd = tun.fd;
+        let cleanup_fd = dup_tun_for_teardown(session_fd)?;
+        state.tun_fd = Some(cleanup_fd);
 
-        debug!("uapi: {}", uapi);
+        log::debug!("uapi: {}", uapi);
         // 2. Hand to libwg-go.
-        let handle = match WireGuardApi::turn_on(&uapi, fd) {
+        let handle = match WireGuardApi::turn_on(&uapi, session_fd) {
             Ok(h) => h,
             Err(e) => {
-                // libwg-go assumes ownership of the fd ONLY on success; close it
-                // here. NB: do not call tun.close() because that would also try
-                // to close it again. Fall back to the raw libc close.
-                unsafe { libc::close(fd) };
-                state.tun_fd = None;
+                close_fd_best_effort("unix wgTurnOn err (session)", session_fd);
+                if let Some(c) = state.tun_fd.take() {
+                    close_fd_best_effort("unix wgTurnOn err (dup)", c);
+                }
                 state.status = ConnectionStatus::Error;
                 return Err(format!("wgTurnOn failed: {}", e));
             }
@@ -339,36 +347,128 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         );
         Ok(())
     }
+
+    #[cfg(not(unix))]
+    {
+        drop(tun);
+        Err("WireGuard server TUN is only implemented on Linux and macOS.".to_string())
+    }
 }
 
-/// Stop the WireGuard server: turn off libwg-go, close TUN.
+/// Duplicate the TUN fd immediately after creation; pass the original to [`WireGuardApi::turn_on`]
+/// and store the copy in [`WireGuardState::tun_fd`]. `stop` closes only the duplicate so we never
+/// `close(2)` the same integer the library may have already closed (which can hit a recycled fd).
+#[cfg(unix)]
+fn dup_tun_for_teardown(session_fd: i32) -> Result<i32, String> {
+    if session_fd < 0 {
+        return Err("invalid TUN file descriptor".to_string());
+    }
+    let cleanup_fd = unsafe { libc::dup(session_fd) };
+    if cleanup_fd < 0 {
+        return Err(format!(
+            "dup(TUN fd): {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(cleanup_fd)
+}
+
+/// Close `fd` if it is still open (skip if EBADF — e.g. already closed by libwg-go).
+#[cfg(unix)]
+fn close_fd_best_effort(label: &str, fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        if libc::fcntl(fd, libc::F_GETFD) < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EBADF) {
+                warn!("{}: fcntl(F_GETFD) on fd {}: {}", label, fd, e);
+            }
+            return;
+        }
+        if libc::close(fd) < 0 {
+            warn!(
+                "{}: close({}): {}",
+                label,
+                fd,
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+/// Stop the WireGuard server: tear down userspace, release kernel TUN, scrub routes.
+///
+/// After [`WireGuardApi::turn_off`], close the **dup** held in [`WireGuardState::tun_fd`] so the
+/// kernel drops the last reference if libwg-go already closed the session fd. Then best-effort
+/// `ip link del` / `ifconfig down` so `InterfaceName` can be recreated.
 pub fn stop(state: &mut WireGuardState) -> Result<(), String> {
     if state.app_mode != AppMode::Server {
         return Err("server::stop called outside server mode".to_string());
     }
 
-    // 1. WireGuard tunnel.
+    let iface_opt = read_env_identity()
+        .ok()
+        .and_then(|(_, _, _, n)| n.filter(|s| !s.is_empty()));
+
+    // 1. Userspace WireGuard (Amnezia/libwg-go).
     if let Some(handle) = state.handle.take() {
         WireGuardApi::turn_off(handle);
         info!("WireGuard tunnel turned off (handle={})", handle);
     }
 
-    // 2. TUN. libwg-go closes the fd it owns on `wgTurnOff`, so we don't
-    //    re-close here unless it was never handed off.
-    state.tun_fd = None;
-    if let Ok((_, _, _, Some(iface_name))) = read_env_identity() {
+    // 2. Close the teardown dup (not the session fd handed to wgTurnOn).
+    #[cfg(unix)]
+    if let Some(fd) = state.tun_fd.take() {
+        close_fd_best_effort("server stop (tun dup)", fd);
+    }
+    #[cfg(not(unix))]
+    {
+        state.tun_fd = None;
+    }
+
+    // 3. Routes (macOS) and link teardown so the next start gets a clean slate.
+    if let Some(ref iface_name) = iface_opt {
         let addr = state
             .wg_config
             .as_ref()
             .map(|w| w.interface.address.clone())
             .unwrap_or_else(|| "10.88.0.1/24".to_string());
-        if let Err(e) = cleanup_server_routes(&iface_name, &addr) {
+        if let Err(e) = cleanup_server_routes(iface_name, &addr) {
             warn!("Failed to cleanup server routes on {}: {}", iface_name, e);
         }
+        best_effort_bring_tun_down(iface_name);
     }
 
     state.status = ConnectionStatus::Disconnected;
     Ok(())
+}
+
+/// Best-effort `ip link down` / `delete` (Linux) or `ifconfig down` (macOS).
+fn best_effort_bring_tun_down(iface: &str) {
+    if iface.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "set", "dev", iface, "down"])
+            .output();
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", "dev", iface])
+            .output();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("ifconfig")
+            .args([iface, "down"])
+            .output();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = iface;
+    }
 }
 
 /// Best-effort throughput counters for the running server.

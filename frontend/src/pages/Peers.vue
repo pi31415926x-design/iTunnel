@@ -231,9 +231,12 @@
         </div>
         <!-- QR Code Body -->
         <div class="p-6 flex flex-col items-center">
-          <div class="bg-white p-2.5 rounded-xl shadow-sm border border-slate-200 mb-5 inline-block">
-            <img :src="'https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=1&data=' + encodeURIComponent(generatePeerConfigText(activeClient))" class="w-52 h-52 object-contain" alt="QR Code" />
+          <div class="bg-white p-2.5 rounded-xl shadow-sm border border-slate-200 mb-3 inline-block">
+            <img :src="peerQrImageUrl" class="w-52 h-52 object-contain" alt="QR Code" />
           </div>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mb-4 max-w-[17rem] mx-auto">
+            Encoded as <span class="font-mono">wg://</span> — paste or scan in Client Endpoints → Import from QR.
+          </p>
           <button 
              @click="handleDownload(activeClient)" 
              class="inline-flex items-center gap-2 px-6 py-2.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 dark:text-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl transition-colors w-full justify-center shadow-sm">
@@ -247,7 +250,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { 
   PlusIcon,
   UserIcon,
@@ -259,6 +262,7 @@ import {
   XMarkIcon,
   ArrowPathIcon
 } from '@heroicons/vue/20/solid';
+import { confToWgUri } from '@/utils/wg-uri';
 
 const clients = ref<any[]>([]);
 const serverPublicKey = ref<string>('');
@@ -377,6 +381,20 @@ ${client.rawQuery?.preshared_key ? 'PresharedKey = ' + client.rawQuery.preshared
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25`;
 };
+
+/** QR payload: wg:// + Base64URL(UTF-8 conf), same as Endpoints import. */
+const peerQrPayload = (client: any) => {
+  const conf = generatePeerConfigText(client).trim();
+  if (!conf) return '';
+  return confToWgUri(conf);
+};
+
+const peerQrImageUrl = computed(() => {
+  const c = activeClient.value;
+  const data = peerQrPayload(c);
+  if (!data) return '';
+  return `https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=2&data=${encodeURIComponent(data)}`;
+});
 
 const handleDownload = (client: any) => {
   if (!client) return;

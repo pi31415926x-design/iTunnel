@@ -88,13 +88,13 @@ fn http_url_for_local_browser(addr: IpAddr, port: u16) -> String {
 // ========== Parse CLI Arguments ==========
 struct StartupOptions {
     app_mode: itunnel::wg::config::AppMode,
-    /// `true`: no Tauri (no GTK tray/window on Linux), only Actix. See `parse_startup_options`.
-    headless: bool,
+    /// When `true`, start Tauri (tray/window). When `false`, Actix only (headless).
+    gui_enabled: bool,
 }
 
 /// `app_mode` from the last of `-s` / `--server` / `-c` / `--client` (default client if none).
-/// **Tauri** runs when there is **no** mode flag (`itunnel` alone → client + tray) or when `--gui`
-/// is passed (`-s --gui`, `-c --gui`, …). **Headless** (`-s` / `-c` without `--gui`) is Actix only.
+/// **Tauri** runs when there is **no** `-s`/`-c` flag (`itunnel` alone → client + tray) **or** when `--gui`
+/// is passed (`-s --gui`, `-c --gui`, …). **Headless** is `-s` / `-c` **without** `--gui` (Actix only).
 fn parse_startup_options() -> StartupOptions {
     let args: Vec<String> = std::env::args().collect();
     let mut app_mode = itunnel::wg::config::AppMode::Client;
@@ -116,9 +116,12 @@ fn parse_startup_options() -> StartupOptions {
         }
     }
 
-    let headless = has_mode_flag && !has_gui;
+    let gui_enabled = !has_mode_flag || has_gui;
 
-    StartupOptions { app_mode, headless }
+    StartupOptions {
+        app_mode,
+        gui_enabled,
+    }
 }
 
 fn spawn_actix_background(
@@ -129,10 +132,6 @@ fn spawn_actix_background(
     listen_port: u16,
 ) {
     std::thread::spawn(move || {
-        println!(
-            "🌐 正在 {}:{} 启动 Web 服务...",
-            listen_addr, listen_port
-        );
         match actix_web::rt::System::new().block_on(start_actix_server(
             static_dir,
             wg_state,
@@ -142,8 +141,8 @@ fn spawn_actix_background(
         )) {
             Ok(_) => println!("✅ Actix 服务已启动"),
             Err(e) => {
-                eprintln!("❌ Actix 服务启动失败: {}", e);
-                eprintln!("💡 提示: 请检查端口 {} 是否被占用", listen_port);
+                error!("❌ Actix 服务启动失败: {}", e);
+                error!("💡 提示: 请检查端口 {} 是否被占用", listen_port);
             }
         }
     });
@@ -202,8 +201,6 @@ async fn start_actix_server(
 ) -> std::io::Result<()> {
     // Wrap the shared state in Actix's Data wrapper
     let wg_data = web::Data::from(wg_state);
-    
-    println!("⚙️ 启动基于 Rust-Embed 的单文件模式静态托管");
 
     HttpServer::new(move || {
         
@@ -280,14 +277,15 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
     let local_api_url = http_url_for_local_browser(http_bind_addr, http_bind_port);
 
     // ========== Parse CLI Arguments ==========
-    let StartupOptions { app_mode, headless } = parse_startup_options();
-    info!("📋 Running in mode: {:?}", app_mode);
-    if headless {
-        info!(
-            "🖥️  Headless (CLI): Tauri UI disabled; API {}",
-            local_api_url
-        );
-    }
+    let StartupOptions {
+        app_mode,
+        gui_enabled,
+    } = parse_startup_options();
+    info!("🗡 Running in mode: {:?} ", app_mode);
+    info!("🎨 Tauri GUI enabled: {}", gui_enabled);
+    info!("🖥️  Local API: {}", local_api_url);
+    info!("🌏 Web server: http://{}:{}", http_bind_addr, http_bind_port);
+    info!("🚀 iTunnel 启动中...");   
 
     // Create shared state
     let initial_payload = match itunnel::wg::store::load_config() {
@@ -357,12 +355,8 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
         });
     });
 
-    if headless {
+    if !gui_enabled {
         let static_dir = resolve_static_dir_headless();
-        println!("🚀 iTunnel 启动中 (headless)...");
-        println!("📂 工作目录: {:?}", std::env::current_dir().unwrap());
-        println!("📁 静态文件路径 (参考): {:?}", static_dir);
-        println!("✅ 静态目录存在: {}", static_dir.exists());
         spawn_actix_background(
             static_dir,
             wg_state.clone(),
@@ -370,7 +364,6 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
             http_bind_addr,
             http_bind_port,
         );
-        println!("✅ 本地 API: {} — Ctrl+C 退出", local_api_url);
         let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let _ = rx.recv();
         return;
@@ -405,12 +398,7 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
                     .join("frontend")
                     .join("dist")
             };
-
-            println!("🚀 iTunnel 启动中...");
-            println!("📂 工作目录: {:?}", std::env::current_dir().unwrap());
-            println!("📁 静态文件路径: {:?}", static_dir);
-            println!("✅ 静态文件目录存在: {}", static_dir.exists());
-
+ 
             // 1. 在异步运行时中启动 Actix-web
             spawn_actix_background(
                 static_dir,
@@ -445,8 +433,6 @@ Endpoint=<YOUR_SERVER_IP>:51820\n";
             } else {
                 res_dir.join("resources").join("icons")
             };
-
-            println!("🎨 Icons path: {:?}", icons_path);
 
             let icon_gray = tauri::image::Image::from_path(icons_path.join("icon_gray.png"))
                 .unwrap_or_else(|e| {
