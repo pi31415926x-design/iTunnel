@@ -4,6 +4,11 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
+      path: "/login",
+      component: () => import("../pages/Login.vue"),
+      meta: { public: true },
+    },
+    {
       path: "/",
       component: () => import("../pages/OverviewSwitcher.vue"),
     },

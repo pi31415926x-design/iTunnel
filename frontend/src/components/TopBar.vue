@@ -6,6 +6,8 @@ import {
     SunIcon
 } from "@heroicons/vue/24/outline";
 import { APP_CONFIG } from "../config/app";
+import { useWireGuardStore } from "@/stores/wireguard";
+import { serverFetch } from "@/server-fetch";
 
 defineProps<{
     sidebarOpen: boolean;
@@ -13,6 +15,16 @@ defineProps<{
 
 defineEmits(["toggleSidebar"]);
 const { isDark, toggleTheme } = useTheme();
+const wireguardStore = useWireGuardStore();
+
+async function serverLogout() {
+  try {
+    await serverFetch("/api/logout", { method: "POST" });
+  } catch {
+    /* ignore */
+  }
+  window.location.assign("/login");
+}
 </script>
 
 <template>
@@ -41,6 +53,14 @@ const { isDark, toggleTheme } = useTheme();
     </button>
     <span class="text-lg text-center text-gray-500 dark:text-gray-400 italic truncate mx-4 flex-1">{{ APP_CONFIG.longName }}</span>
     <!-- Right -->
+    <button
+      v-if="wireguardStore.mode === 'server'"
+      type="button"
+      @click="serverLogout"
+      class="mr-1 rounded px-2 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+    >
+      Log out
+    </button>
     <button
       @click="toggleTheme"
       class="

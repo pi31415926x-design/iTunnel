@@ -4,7 +4,8 @@
 //!
 //! 1. Mutates the in-memory peer list under the global [`WireGuardState`].
 //! 2. Persists changes to `~/.itunnel/itunnel_peers.json`.
-//! 3. Hot-reloads the running tunnel via `wg::server::apply_peers`.
+//! 3. Hot-reloads the running tunnel via `wg::server::apply_peers` (full UAPI with
+//!    `replace_peers=true`) for all peer changes, including `/api/peer_delete` and runtime toggles.
 //! 4. Exposes start/stop/status to the WebUI.
 
 use crate::api::local_api::endpoint_routes;
@@ -28,9 +29,20 @@ pub struct AddPeerRequest {
     pub endpoint: Option<String>,
 }
 
+fn default_permanent_delete() -> bool {
+    true
+}
+
 #[derive(Deserialize, Debug)]
 pub struct DeletePeerRequest {
     pub public_key: String,
+    /// When `true` (default): remove peer from `itunnel_peers.json` and full `set_config`
+    /// via [`wg_server::apply_peers`] if the server is running.
+    #[serde(default = "default_permanent_delete")]
+    pub permanent_delete: bool,
+    /// When `permanent_delete` is `false`, required. `true` = include peer in the next full
+    /// UAPI; `false` = soft-disable (omit from UAPI, still on disk).
+    pub enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -116,20 +128,35 @@ fn server_identity_from_env() -> (String, String) {
 
 #[get("/api/peer_list")]
 pub async fn list_peers_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
-    let peers = {
+    let (data, server_public_key, server_endpoint) = {
         let state_lock = state.lock().unwrap();
-        if let Some(wg) = &state_lock.wg_config {
+        let peers = if let Some(wg) = &state_lock.wg_config {
             wg.peers.clone()
         } else {
             store::load_peers().unwrap_or_default()
-        }
+        };
+        let flags = wg_server::peers_wg_runtime_active(&state_lock, &peers);
+        let data: Vec<serde_json::Value> = peers
+            .iter()
+            .zip(flags.iter())
+            .map(|(p, active)| {
+                let mut v = serde_json::to_value(p).unwrap_or(serde_json::json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(
+                        "wg_runtime_active".to_string(),
+                        serde_json::json!(active),
+                    );
+                }
+                v
+            })
+            .collect();
+        let (server_public_key, server_endpoint) = server_identity_from_env();
+        (data, server_public_key, server_endpoint)
     };
-
-    let (server_public_key, server_endpoint) = server_identity_from_env();
 
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
-        "data": peers,
+        "data": data,
         "server_public_key": server_public_key,
         "server_endpoint": server_endpoint,
     }))
@@ -291,30 +318,107 @@ pub async fn delete_peer_handler(
     let mut state_lock = state.lock().unwrap();
     let _ = wg_server::load_server_config(&mut state_lock);
 
-    let mut peers = state_lock
-        .wg_config
-        .as_ref()
-        .map(|w| w.peers.clone())
-        .unwrap_or_default();
+    if req.permanent_delete {
+        let mut peers = state_lock
+            .wg_config
+            .as_ref()
+            .map(|w| w.peers.clone())
+            .unwrap_or_default();
 
-    let initial = peers.len();
-    peers.retain(|p| p.public_key != req.public_key);
-    if peers.len() == initial {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "success": false,
-            "message": "Peer not found"
-        }));
-    }
+        let initial = peers.len();
+        peers.retain(|p| p.public_key != req.public_key);
+        if peers.len() == initial {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "Peer not found"
+            }));
+        }
 
-    match commit_peers(&mut state_lock, peers) {
-        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "message": "Peer deleted successfully"
-        })),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false,
-            "message": e
-        })),
+        if let Err(e) = store::save_peers(&peers) {
+            error!("Failed to persist peers after delete: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": e
+            }));
+        }
+
+        if let Some(ref mut wg) = state_lock.wg_config {
+            wg.peers = peers.clone();
+        }
+        state_lock
+            .server_runtime_excluded_pubkeys
+            .remove(&req.public_key);
+
+        match wg_server::apply_peers(&mut state_lock, &peers) {
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "Peer deleted successfully"
+            })),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": e
+            })),
+        }
+    } else {
+        let enabled = match req.enabled {
+            Some(v) => v,
+            None => {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "success": false,
+                    "message": "When permanent_delete is false, `enabled` is required"
+                }));
+            }
+        };
+
+        let in_list = state_lock
+            .wg_config
+            .as_ref()
+            .map(|w| w.peers.iter().any(|p| p.public_key == req.public_key))
+            .unwrap_or(false);
+        if !in_list {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "Peer not found in configured peer list"
+            }));
+        }
+
+        if state_lock.handle.is_none() {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "message": "WireGuard server is not running"
+            }));
+        }
+
+        if enabled {
+            state_lock
+                .server_runtime_excluded_pubkeys
+                .remove(&req.public_key);
+        } else {
+            state_lock
+                .server_runtime_excluded_pubkeys
+                .insert(req.public_key.clone());
+        }
+
+        let peers = state_lock
+            .wg_config
+            .as_ref()
+            .map(|w| w.peers.clone())
+            .unwrap_or_default();
+
+        match wg_server::apply_peers(&mut state_lock, &peers) {
+            Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": if enabled {
+                    "Peer applied to running tunnel"
+                } else {
+                    "Peer removed from running tunnel"
+                }
+            })),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": e
+            })),
+        }
     }
 }
 
@@ -388,6 +492,7 @@ pub async fn stop_server_handler(state: web::Data<Mutex<WireGuardState>>) -> imp
 }
 
 pub fn server_routes(cfg: &mut web::ServiceConfig) {
+    crate::api::server_session::register(cfg);
     endpoint_routes(cfg);
     cfg.service(generate_peer_handler)
         .service(add_peer_handler)

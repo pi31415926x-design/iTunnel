@@ -160,6 +160,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { serverFetch } from '@/server-fetch';
 import {
   ArrowUpIcon,
   ArrowDownIcon,
@@ -195,7 +196,7 @@ let statusInterval: ReturnType<typeof setInterval> | null = null;
 
 async function fetchStatus() {
   try {
-    const res = await fetch('/api/server_status');
+    const res = await serverFetch('/api/server_status');
     const json = await res.json();
     if (json.success) {
       serverRunning.value = json.running;
@@ -224,7 +225,7 @@ async function toggleServer() {
   const endpoint = serverRunning.value ? '/api/stop' : '/api/start';
 
   try {
-    const res = await fetch(endpoint, {
+    const res = await serverFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: serverRunning.value

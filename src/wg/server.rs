@@ -29,7 +29,7 @@
 //!
 //! Cross-platform notes:
 //!
-//! - Windows server mode is not yet supported (TUN layer is stubbed).
+//! - **Windows server**: Wintun via libwg-go `createTun`; `netsh` configures IPv4 after `wgTurnOn`.
 
 use crate::wg::config::{AmneziaParams, AppMode, ConnectionStatus, Peer, Wg, WireGuardState};
 use crate::wg::tun::TunDevice;
@@ -195,11 +195,13 @@ pub fn build_uapi(wg: &Wg) -> Result<String, String> {
         }
         // Never emit `endpoint=` in server mode: roaming clients negotiate address
         // from incoming UDP only; persisted peer.endpoint may still exist in UI/JSON for display/export.
-        if let Some(ka) = p.persistent_keepalive {
-            if ka > 0 {
-                s.push_str(&format!("persistent_keepalive_interval={}\n", ka));
-            }
-        }
+
+        //TODO: 这里需要根据配置文件来决定是否启用持久化心跳
+        // if let Some(ka) = p.persistent_keepalive {
+        //     if ka > 0 {
+        //         s.push_str(&format!("persistent_keepalive_interval={}\n", ka));
+        //     }
+        // }
     }
 
     Ok(s)
@@ -230,14 +232,15 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         wg.interface.amnezia_params = None;
         state.wg_config = Some(wg.clone());
     }
-    let uapi = build_uapi(&wg)?;
+    let wg_uapi = wg_config_for_device_uapi(state, &wg);
+    let uapi = build_uapi(&wg_uapi)?;
 
     // 1. TUN (name from .env: InterfaceName=...)
     let iface = tun_name_opt
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             "Server TUN name is not set. Add InterfaceName=... to the project root .env (e.g. \
-             utun88 on macOS, wg0 on Linux)."
+             utun88 on macOS, wg0 on Linux, itunnel on Windows with Wintun)."
                 .to_string()
         })?;
 
@@ -296,10 +299,11 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         state.handle = Some(handle);
         state.status = ConnectionStatus::Connected;
         info!(
-            "✅ WireGuard server up: iface={}, listen={}, peers={}, handle={}",
+            "✅ WireGuard server up: iface={}, listen={}, peers={} ({} in UAPI), handle={}",
             iface,
             wg.interface.listen_port,
             wg.peers.len(),
+            wg_uapi.peers.len(),
             handle
         );
         return Ok(());
@@ -339,26 +343,72 @@ pub fn start(state: &mut WireGuardState, protocol_obfuscation: bool) -> Result<(
         state.handle = Some(handle);
         state.status = ConnectionStatus::Connected;
         info!(
-            "✅ WireGuard server up: iface={}, listen={}, peers={}, handle={}",
+            "✅ WireGuard server up: iface={}, listen={}, peers={} ({} in UAPI), handle={}",
             iface,
             wg.interface.listen_port,
             wg.peers.len(),
+            wg_uapi.peers.len(),
             handle
         );
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        // Same ordering as Linux: wgTurnOn first, then OS IPv4 / MTU (Wintun + netsh).
+        let session_fd = tun.fd;
+        let cleanup_fd = dup_tun_for_teardown(session_fd)?;
+        state.tun_fd = Some(cleanup_fd);
+        log::debug!("uapi: {}", uapi);
+        let handle = match WireGuardApi::turn_on(&uapi, session_fd) {
+            Ok(h) => h,
+            Err(e) => {
+                close_fd_best_effort("windows wgTurnOn err (session)", session_fd);
+                if let Some(c) = state.tun_fd.take() {
+                    close_fd_best_effort("windows wgTurnOn err (dup)", c);
+                }
+                state.status = ConnectionStatus::Error;
+                return Err(format!("wgTurnOn failed: {}", e));
+            }
+        };
+        if let Err(e) = tun.configure_address(&tunnel_addrs) {
+            WireGuardApi::turn_off(handle);
+            if let Some(c) = state.tun_fd.take() {
+                close_fd_best_effort("windows configure_addr (dup)", c);
+            }
+            state.status = ConnectionStatus::Error;
+            return Err(format!(
+                "Configure {} on {} failed: {}",
+                tunnel_addrs, iface, e
+            ));
+        }
+        if let Err(e) = tun.set_mtu(mtu) {
+            warn!("Windows MTU on {}: {}", iface, e);
+        }
+        state.handle = Some(handle);
+        state.status = ConnectionStatus::Connected;
+        info!(
+            "✅ WireGuard server up: iface={}, listen={}, peers={} ({} in UAPI), handle={}",
+            iface,
+            wg.interface.listen_port,
+            wg.peers.len(),
+            wg_uapi.peers.len(),
+            handle
+        );
+        Ok(())
+    }
+
+    #[cfg(all(not(unix), not(target_os = "windows")))]
     {
         drop(tun);
-        Err("WireGuard server TUN is only implemented on Linux and macOS.".to_string())
+        Err("WireGuard server TUN is not implemented on this platform.".to_string())
     }
 }
 
 /// Duplicate the TUN fd immediately after creation; pass the original to [`WireGuardApi::turn_on`]
 /// and store the copy in [`WireGuardState::tun_fd`]. `stop` closes only the duplicate so we never
 /// `close(2)` the same integer the library may have already closed (which can hit a recycled fd).
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn dup_tun_for_teardown(session_fd: i32) -> Result<i32, String> {
     if session_fd < 0 {
         return Err("invalid TUN file descriptor".to_string());
@@ -398,6 +448,21 @@ fn close_fd_best_effort(label: &str, fd: i32) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn close_fd_best_effort(label: &str, fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    unsafe {
+        if libc::close(fd) < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EBADF) {
+                warn!("{}: close({}): {}", label, fd, e);
+            }
+        }
+    }
+}
+
 /// Stop the WireGuard server: tear down userspace, release kernel TUN, scrub routes.
 ///
 /// After [`WireGuardApi::turn_off`], close the **dup** held in [`WireGuardState::tun_fd`] so the
@@ -419,11 +484,11 @@ pub fn stop(state: &mut WireGuardState) -> Result<(), String> {
     }
 
     // 2. Close the teardown dup (not the session fd handed to wgTurnOn).
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "windows"))]
     if let Some(fd) = state.tun_fd.take() {
         close_fd_best_effort("server stop (tun dup)", fd);
     }
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(target_os = "windows")))]
     {
         state.tun_fd = None;
     }
@@ -482,26 +547,55 @@ pub fn stats(state: &WireGuardState) -> (u64, u64) {
     (0, 0)
 }
 
+/// Full in-memory peer list with interface settings, minus peers soft-disabled for the device.
+pub fn wg_config_for_device_uapi(state: &WireGuardState, wg: &Wg) -> Wg {
+    let mut w = wg.clone();
+    w.peers = w
+        .peers
+        .iter()
+        .filter(|p| !state.server_runtime_excluded_pubkeys.contains(&p.public_key))
+        .cloned()
+        .collect();
+    w
+}
+
 /// Apply a hot-reload of the peer list to a running server. Caller is
 /// responsible for persisting via `wg::store::save_peers` first.
+///
+/// Always pushes a **full** UAPI from [`build_uapi`] (including `replace_peers=true`); peers in
+/// [`WireGuardState::server_runtime_excluded_pubkeys`] are omitted from the device config only.
 pub fn apply_peers(state: &mut WireGuardState, new_peers: &[Peer]) -> Result<(), String> {
     let mut wg = state.wg_config.clone().unwrap_or_default();
     wg.peers = new_peers.to_vec();
     state.wg_config = Some(wg.clone());
 
     if let Some(handle) = state.handle {
-        let uapi = build_uapi(&wg)?;
+        let wg_uapi = wg_config_for_device_uapi(state, &wg);
+        let uapi = build_uapi(&wg_uapi)?;
         if let Err(rc) = WireGuardApi::set_config(handle, &uapi) {
             return Err(format!("wgSetConfig returned {}", rc));
         }
         info!(
-            "Hot-reloaded {} peers into running server (handle={})",
+            "Hot-reloaded {} configured peers ({} in UAPI) into running server (handle={})",
             new_peers.len(),
+            wg_uapi.peers.len(),
             handle
         );
     }
 
     Ok(())
+}
+
+/// UI hint: whether each configured peer is included in the live tunnel (not soft-disabled).
+/// When the server is not running, all entries are `true` (toggles are inert until start).
+pub fn peers_wg_runtime_active(state: &WireGuardState, peers: &[Peer]) -> Vec<bool> {
+    if state.handle.is_none() {
+        return vec![true; peers.len()];
+    }
+    peers
+        .iter()
+        .map(|p| !state.server_runtime_excluded_pubkeys.contains(&p.public_key))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -793,10 +887,10 @@ mod tests {
             "server uapi must not contain peer endpoint=, got:\n{}",
             uapi
         );
-        assert!(
-            uapi.contains("persistent_keepalive_interval="),
-            "expected keepalive in uapi"
-        );
+        // assert!(
+        //     uapi.contains("persistent_keepalive_interval="),
+        //     "expected keepalive in uapi"
+        // );
     }
 
     #[cfg(target_os = "linux")]

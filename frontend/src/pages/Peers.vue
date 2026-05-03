@@ -35,16 +35,16 @@
               <h3 class="text-[1.05rem] font-medium truncate">{{ client.name || 'Unnamed Peer' }}</h3>
               <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500 dark:text-slate-400 text-opacity-80">
                 <span>{{ client.ip }}</span>
-                <template v-if="client.active && client.enabled">
+                <template v-if="client.hasLiveStats && client.enabled">
                   <span class="text-slate-300 dark:text-slate-600">·</span>
-                  <span class="flex items-center gap-0.5">
-                    <ArrowDownIcon class="w-3.5 h-3.5" /> {{ client.rxSpeed }}
+                  <span class="flex items-center gap-0.5" title="rx_bytes">
+                    <ArrowDownIcon class="w-3.5 h-3.5" /> rx {{ client.statRx }}
                   </span>
-                  <span class="flex items-center gap-0.5">
-                    <ArrowUpIcon class="w-3.5 h-3.5" /> {{ client.txSpeed }}
+                  <span class="flex items-center gap-0.5" title="tx_bytes">
+                    <ArrowUpIcon class="w-3.5 h-3.5" /> tx {{ client.statTx }}
                   </span>
                   <span class="text-slate-300 dark:text-slate-600">·</span>
-                  <span>{{ client.lastSeen }}</span>
+                  <span class="tabular-nums" title="last_handshake_time_sec (unix s)">handshake {{ client.statHandshake }}</span>
                 </template>
               </div>
             </div>
@@ -54,7 +54,7 @@
               
               <!-- Toggle -->
               <button 
-                @click="client.enabled = !client.enabled"
+                @click="togglePeerRuntime(client)"
                 :class="[
                   client.enabled ? 'bg-red-700' : 'bg-slate-200 dark:bg-slate-700',
                   'relative inline-flex h-7 w-12 items-center rounded-full transition-colors mr-3'
@@ -250,7 +250,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { 
   PlusIcon,
   UserIcon,
@@ -263,6 +263,11 @@ import {
   ArrowPathIcon
 } from '@heroicons/vue/20/solid';
 import { confToWgUri } from '@/utils/wg-uri';
+import { serverFetch } from '@/server-fetch';
+
+const WG_STATS_POLL_MS = 3000;
+const appIsServer = ref(false);
+let wgStatsTimer: ReturnType<typeof setInterval> | null = null;
 
 const clients = ref<any[]>([]);
 const serverPublicKey = ref<string>('');
@@ -275,9 +280,164 @@ function defaultPeerEndpointFromEnv(): string {
   return ep;
 }
 
+/** WireGuard base64 key (44 chars) → lowercase hex (64 chars) to match UAPI `public_key`. */
+function wgPublicKeyB64ToHex(b64: string): string {
+  const s = b64.trim();
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+  let hex = '';
+  for (let i = 0; i < bin.length; i++) {
+    hex += bin.charCodeAt(i).toString(16).padStart(2, '0');
+  }
+  return hex.toLowerCase();
+}
+
+function uapiPeerPublicKeyHex(peer: Record<string, unknown>): string | null {
+  const pk = peer.public_key;
+  if (pk == null) return null;
+  if (Array.isArray(pk)) return String(pk[0] ?? '').toLowerCase();
+  return String(pk).toLowerCase();
+}
+
+function firstNumeric(v: unknown): number {
+  if (v == null) return 0;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const n = parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function fmtBytes(n: number): string {
+  if (n <= 0) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let x = n;
+  let i = 0;
+  while (x >= 1024 && i < u.length - 1) {
+    x /= 1024;
+    i++;
+  }
+  return i === 0 ? `${Math.round(x)} ${u[i]}` : `${x >= 10 ? x.toFixed(0) : x.toFixed(1)} ${u[i]}`;
+}
+
+/** `last_handshake_time_sec` from wgGetConfig: seconds since Unix epoch (0 = never). */
+function fmtHandshakeUnix(sec: number): string {
+  if (!sec) return '—';
+  const now = Math.floor(Date.now() / 1000);
+  const ago = now - sec;
+  if (ago < 0) return '—';
+  if (ago < 5) return 'just now';
+  if (ago < 60) return `${ago}s ago`;
+  if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
+  if (ago < 86400) return `${Math.floor(ago / 3600)}h ago`;
+  return `${Math.floor(ago / 86400)}d ago`;
+}
+
+function normalizeAllowedIpToken(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+/** All `allowed_ip=` lines for a peer from UAPI JSON (string or array of strings). */
+function collectUapiPeerAllowedIps(peer: Record<string, unknown>): Set<string> {
+  const out = new Set<string>();
+  const add = (v: unknown) => {
+    if (v == null) return;
+    if (Array.isArray(v)) {
+      for (const x of v) out.add(normalizeAllowedIpToken(String(x)));
+    } else {
+      out.add(normalizeAllowedIpToken(String(v)));
+    }
+  };
+  add(peer.allowed_ip);
+  return out;
+}
+
+async function detectServerMode(): Promise<boolean> {
+  const w = typeof window !== 'undefined' ? (window as unknown as { __ITUNNEL_APP_MODE__?: string }) : null;
+  if (w?.__ITUNNEL_APP_MODE__ === 'server') return true;
+  try {
+    const res = await serverFetch('/api/mode');
+    const json = await res.json();
+    return json.mode === 'server';
+  } catch {
+    return false;
+  }
+}
+
+async function pollWgLiveStats() {
+  if (!appIsServer.value || !clients.value.length) return;
+  try {
+    const res = await serverFetch('/api/get_wg_config');
+    const json = await res.json();
+    const livePeers = json.config_readable?.peers;
+    if (!Array.isArray(livePeers)) {
+      for (const c of clients.value) {
+        c.hasLiveStats = false;
+        c.active = false;
+        c.statRx = '';
+        c.statTx = '';
+        c.statHandshake = '';
+      }
+      return;
+    }
+
+    const byPk = new Map<string, Record<string, unknown>>();
+    for (const p of livePeers as Record<string, unknown>[]) {
+      const hex = uapiPeerPublicKeyHex(p);
+      if (hex) byPk.set(hex, p);
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    for (const c of clients.value) {
+      const b64 = c.rawQuery?.public_key as string | undefined;
+      if (!c.enabled) {
+        c.hasLiveStats = false;
+        c.active = false;
+        c.statRx = '';
+        c.statTx = '';
+        c.statHandshake = '';
+        continue;
+      }
+
+      let live: Record<string, unknown> | undefined;
+      if (b64) {
+        try {
+          const hex = wgPublicKeyB64ToHex(b64);
+          live = byPk.get(hex);
+        } catch {
+          /* fall through to IP match */
+        }
+      }
+      if (!live && c.ip && c.ip !== 'N/A') {
+        const want = normalizeAllowedIpToken(String(c.ip));
+        live = (livePeers as Record<string, unknown>[]).find((p) => collectUapiPeerAllowedIps(p).has(want));
+      }
+      if (!live) {
+        c.hasLiveStats = false;
+        c.active = false;
+        c.statRx = '';
+        c.statTx = '';
+        c.statHandshake = '';
+        continue;
+      }
+
+      const rx = firstNumeric(live.rx_bytes ?? (live as any).transfer_rx);
+      const tx = firstNumeric(live.tx_bytes ?? (live as any).transfer_tx);
+      const lh = firstNumeric(live.last_handshake_time_sec);
+
+      c.statRx = fmtBytes(rx);
+      c.statTx = fmtBytes(tx);
+      c.statHandshake = fmtHandshakeUnix(lh);
+      c.hasLiveStats = true;
+      const recentHs = lh > 0 && now - lh < 180;
+      c.active = recentHs || rx > 0 || tx > 0;
+    }
+  } catch (e) {
+    console.error('pollWgLiveStats failed', e);
+  }
+}
+
 const loadPeers = async () => {
   try {
-    const res = await fetch('/api/peer_list');
+    const res = await serverFetch('/api/peer_list');
     const json = await res.json();
     if (json.success && json.data) {
       serverPublicKey.value = json.server_public_key || '<MISSING_SERVER_PUBLIC_KEY>';
@@ -286,12 +446,13 @@ const loadPeers = async () => {
         id: idx.toString(),
         name: peer.name || 'Unnamed Peer',
         ip: peer.allowed_ips.length > 0 ? peer.allowed_ips[0] : 'N/A',
-        rxSpeed: '',
-        txSpeed: '',
-        lastSeen: 'just now',
-        enabled: true,
+        enabled: peer.wg_runtime_active !== false,
         active: false,
-        rawQuery: peer
+        hasLiveStats: false,
+        statRx: '',
+        statTx: '',
+        statHandshake: '',
+        rawQuery: peer,
       }));
     }
   } catch (e) {
@@ -299,8 +460,20 @@ const loadPeers = async () => {
   }
 };
 
-onMounted(() => {
-  loadPeers();
+onMounted(async () => {
+  await loadPeers();
+  appIsServer.value = await detectServerMode();
+  if (appIsServer.value) {
+    await pollWgLiveStats();
+    wgStatsTimer = setInterval(pollWgLiveStats, WG_STATS_POLL_MS);
+  }
+});
+
+onUnmounted(() => {
+  if (wgStatsTimer != null) {
+    clearInterval(wgStatsTimer);
+    wgStatsTimer = null;
+  }
 });
 
 const showModal = ref(false);
@@ -350,19 +523,48 @@ const editPeer = (client: any) => {
   showModal.value = true;
 };
 
+const togglePeerRuntime = async (client: any) => {
+  const next = !client.enabled;
+  try {
+    const res = await serverFetch('/api/peer_delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        public_key: client.rawQuery.public_key,
+        permanent_delete: false,
+        enabled: next,
+      }),
+    });
+    const json = await res.json();
+    if (json.success) {
+      client.enabled = next;
+      void pollWgLiveStats();
+    } else {
+      alert(json.message || 'Request failed');
+    }
+  } catch (e) {
+    console.error('Failed to toggle peer', e);
+    alert('Failed to toggle peer');
+  }
+};
+
 const deletePeer = async (client: any) => {
   if (!confirm(`Are you sure you want to delete peer ${client.name || client.public_key}?`)) return;
   
   try {
-    const res = await fetch('/api/peer_delete', {
+    const res = await serverFetch('/api/peer_delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: client.rawQuery.public_key })
+      body: JSON.stringify({
+        public_key: client.rawQuery.public_key,
+        permanent_delete: true,
+      })
     });
     
     const json = await res.json();
     if (json.success) {
       await loadPeers();
+      void pollWgLiveStats();
     } else {
       alert("Error deleting peer: " + json.message);
     }
@@ -420,7 +622,7 @@ const generateKeys = async () => {
   if (isGenerating.value) return;
   isGenerating.value = true;
   try {
-    const res = await fetch('/api/peer_generate');
+    const res = await serverFetch('/api/peer_generate');
     const json = await res.json();
     if (json.success && json.data) {
       formData.value.private_key = json.data.private_key;
@@ -457,7 +659,7 @@ const savePeer = async () => {
       payload.original_public_key = originalPublicKey.value;
     }
 
-    const res = await fetch(apiPath, {
+    const res = await serverFetch(apiPath, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -469,6 +671,7 @@ const savePeer = async () => {
       showModal.value = false;
       // Reload peers list
       await loadPeers();
+      void pollWgLiveStats();
     } else {
       alert("Error: " + json.message);
     }
