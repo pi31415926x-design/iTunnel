@@ -124,11 +124,17 @@ extern "C" fn rust_logger_trampoline(_ctx: *mut c_void, level: c_int, msg: *cons
         }
     }
 
-    // 最后再输出日志
+    // 最后再输出日志（Verbose / Unknown 仅在非 release 构建中输出，避免生产刷屏）
     match rust_level {
-        LogLevel::Verbose => log::debug!("[WG-Go] {}", message),
+        LogLevel::Verbose => {
+            #[cfg(debug_assertions)]
+            log::debug!("[WG-Go] {}", message);
+        }
         LogLevel::Error => log::error!("[WG-Go] {}", message),
-        LogLevel::Unknown => log::warn!("[WG-Go] [Unknown Level] {}", message),
+        LogLevel::Unknown => {
+            #[cfg(debug_assertions)]
+            log::warn!("[WG-Go] [Unknown Level] {}", message);
+        }
     }
 }
 

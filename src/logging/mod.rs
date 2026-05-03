@@ -24,6 +24,12 @@ pub fn get_recent_logs() -> Vec<LogEntry> {
     }
 }
 
+pub fn clear_recent_logs() {
+    if let Ok(mut guard) = LOG_BUFFER.lock() {
+        guard.clear();
+    }
+}
+
 pub fn init() {
     let env = Env::default().filter_or("RUST_LOG", "trace");
     let mut builder = Builder::from_env(env);

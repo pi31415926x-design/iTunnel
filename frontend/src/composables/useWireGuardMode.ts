@@ -20,11 +20,15 @@ export function useWireGuardMode() {
       // Initialize WireGuard store first to determine mode
       await wireguardStore.initialize();
 
-      // Load endpoints and settings
-      await Promise.all([
-        endpointsStore.fetchEndpoints(),
-        settingsStore.loadSettings(),
-      ]);
+      // Client-only Actix routes (`/api/endpoints`, `/api/settings/enhance-mode`, …) are not
+      // registered in server mode; those GETs would hit the SPA fallback (HTML) and break JSON
+      // parsing. Skip them so `--server` reliably reaches ServerOverview.
+      if (wireguardStore.mode === 'client') {
+        await Promise.all([
+          endpointsStore.fetchEndpoints(),
+          settingsStore.loadSettings(),
+        ]);
+      }
 
       console.log('✅ App initialized successfully');
       return true;

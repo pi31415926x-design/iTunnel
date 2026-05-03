@@ -335,19 +335,6 @@ const toggleGateway = async () => {
   }
 };
 
-const fetchUserInfo = async () => {
-  try {
-    const res = await fetch('/api/user_info');
-    if (res.ok) {
-      const data = await res.json();
-      userExpire.value = data.expire;
-      deviceUuid.value = data.device_id;
-    }
-  } catch (e) {
-    console.error("Failed to fetch user info:", e);
-  }
-};
-
 const toggleNode = async (id: string) => {
   if (enabledNode.value === id) {
     enabledNode.value = null;
@@ -422,7 +409,6 @@ const runSpeedTest = async () => {
 
 onMounted(() => {
   fetchStats();
-  fetchUserInfo();
   fetchServers();
   runSpeedTest();
   intervalId = setInterval(fetchStats, 1000);

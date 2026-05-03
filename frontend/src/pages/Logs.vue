@@ -3,13 +3,13 @@
     <!-- Header -->
     <div class="flex items-center justify-between shrink-0">
       <h1 class="text-lg font-semibold dark:text-gray-100">Application Logs</h1>
-      <div class="flex gap-2">
+      <div class="flex items-center gap-2 flex-wrap justify-end">
         <input v-model="searchQuery"
           class="border px-2 py-1 rounded-md w-64 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs dark:text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
           placeholder="Search logs..." />
 
         <select v-model="levelFilter"
-          class="border px-2 py-1 rounded-md dark:border-slate-700 bg-white dark:bg-slate-800 text-xs dark:text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500">
+          class="border px-2 py-1 rounded-md dark:border-slate-700 bg-white dark:bg-slate-800 text-xs dark:text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500 shrink-0">
           <option value="ALL">ALL LEVELS</option>
           <option value="INFO">INFO</option>
           <option value="WARN">WARN</option>
@@ -17,6 +17,18 @@
           <option value="DEBUG">DEBUG</option>
           <option value="TRACE">TRACE</option>
         </select>
+
+        <button
+          type="button"
+          class="border px-2 py-1 rounded-md text-xs font-medium shrink-0 transition-colors
+            border-slate-300 bg-white text-slate-700 hover:bg-slate-50
+            dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700
+            focus:outline-none focus:ring-1 focus:ring-red-500"
+          :disabled="clearingLogs"
+          @click="clearLogs"
+        >
+          {{ clearingLogs ? '…' : 'Clear log' }}
+        </button>
       </div>
     </div>
 
@@ -25,44 +37,44 @@
       class="flex-1 border rounded-lg overflow-hidden bg-white dark:bg-slate-900 dark:border-slate-700 shadow-sm flex flex-col">
       <!-- Table Header -->
       <div
-        class="flex bg-gray-50 dark:bg-slate-800 border-b dark:border-slate-700 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider shrink-0 select-none">
-        <div class="px-2 py-1 relative border-r dark:border-slate-700 flex items-center"
+        class="flex bg-gray-50 dark:bg-slate-800 border-b dark:border-slate-700 text-[10px] leading-tight font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide shrink-0 select-none">
+        <div class="px-1.5 py-0.5 relative border-r dark:border-slate-700 flex items-center min-h-[1.5rem]"
           :style="{ width: colWidths.ts + 'px' }">
           Timestamp
           <div class="resize-handle" @mousedown="startResize('ts', $event)"></div>
         </div>
-        <div class="px-2 py-1 relative border-r dark:border-slate-700 flex items-center"
+        <div class="px-1.5 py-0.5 relative border-r dark:border-slate-700 flex items-center min-h-[1.5rem]"
           :style="{ width: colWidths.level + 'px' }">
           Level
           <div class="resize-handle" @mousedown="startResize('level', $event)"></div>
         </div>
-        <div class="px-2 py-1 relative border-r dark:border-slate-700 flex items-center"
+        <div class="px-1.5 py-0.5 relative border-r dark:border-slate-700 flex items-center min-h-[1.5rem]"
           :style="{ width: colWidths.target + 'px' }">
           Module
           <div class="resize-handle" @mousedown="startResize('target', $event)"></div>
         </div>
-        <div class="px-2 py-1 flex-1">Message</div>
+        <div class="px-1.5 py-0.5 flex-1 flex items-center min-h-[1.5rem]">Message</div>
       </div>
 
       <!-- Table Body -->
       <div class="overflow-y-auto flex-1 p-0 scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-slate-600">
-        <div v-if="filteredLogs.length === 0" class="p-8 text-center text-gray-400 dark:text-gray-500 text-xs">
+        <div v-if="filteredLogs.length === 0" class="p-4 text-center text-gray-400 dark:text-gray-500 text-[11px]">
           Waiting for logs...
         </div>
         <div v-for="(log, index) in filteredLogs" :key="index"
-          class="flex border-b last:border-b-0 dark:border-slate-800/50 hover:bg-gray-50 dark:hover:bg-slate-800/50 items-start text-xs font-mono transition-colors">
-          <span class="px-2 py-0.5 text-slate-500 dark:text-slate-500 shrink-0 border-r dark:border-slate-800/50"
+          class="flex border-b last:border-b-0 dark:border-slate-800/50 hover:bg-gray-50 dark:hover:bg-slate-800/50 items-start text-[11px] leading-snug font-mono transition-colors">
+          <span class="px-1.5 py-px text-slate-500 dark:text-slate-500 shrink-0 border-r dark:border-slate-800/50"
             :style="{ width: colWidths.ts + 'px' }">{{ log.ts }}</span>
-          <span class="px-2 py-0.5 border-r dark:border-slate-800/50 shrink-0"
+          <span class="px-1.5 py-px border-r dark:border-slate-800/50 shrink-0 whitespace-nowrap"
             :style="{ width: colWidths.level + 'px' }" :class="levelClass(log.level)">
             {{ log.level }}
           </span>
           <span
-            class="px-2 py-0.5 text-slate-600 dark:text-slate-400 border-r dark:border-slate-800/50 shrink-0 truncate"
+            class="px-1.5 py-px text-slate-600 dark:text-slate-400 border-r dark:border-slate-800/50 shrink-0 truncate"
             :style="{ width: colWidths.target + 'px' }" :title="log.target">
             {{ log.target }}
           </span>
-          <span class="px-2 py-0.5 text-gray-800 dark:text-gray-300 flex-1 break-words whitespace-pre-wrap">{{
+          <span class="px-1.5 py-px text-gray-800 dark:text-gray-300 flex-1 break-words whitespace-pre-wrap">{{
             log.message }}</span>
         </div>
       </div>
@@ -83,13 +95,14 @@ interface LogEntry {
 const logs = ref<LogEntry[]>([]);
 const searchQuery = ref('');
 const levelFilter = ref('ALL');
+const clearingLogs = ref(false);
 let intervalId: any;
 
 // Column Resizing Logic
 const colWidths = reactive({
-  ts: 140,
-  level: 60,
-  target: 120
+  ts: 132,
+  level: 52,
+  target: 100
 });
 
 const startResize = (col: keyof typeof colWidths, event: MouseEvent) => {
@@ -135,12 +148,27 @@ const filteredLogs = computed(() => {
 
 const levelClass = (level: string) => {
   switch (level) {
-    case "ERROR": return "text-red-600 dark:text-red-400 font-bold";
-    case "WARN": return "text-amber-600 dark:text-amber-400 font-bold";
-    case "INFO": return "text-green-600 dark:text-green-400 font-bold";
+    case "ERROR": return "text-red-600 dark:text-red-400 font-semibold";
+    case "WARN": return "text-amber-600 dark:text-amber-400 font-semibold";
+    case "INFO": return "text-green-600 dark:text-green-400 font-semibold";
     case "DEBUG": return "text-blue-600 dark:text-blue-400";
     case "TRACE": return "text-purple-600 dark:text-purple-400";
     default: return "text-slate-600 dark:text-slate-400";
+  }
+};
+
+const clearLogs = async () => {
+  if (clearingLogs.value) return;
+  clearingLogs.value = true;
+  try {
+    const res = await fetch('/api/logs/clear', { method: 'POST' });
+    if (res.ok) {
+      logs.value = [];
+    }
+  } catch (e) {
+    console.error('Failed to clear logs:', e);
+  } finally {
+    clearingLogs.value = false;
   }
 };
 

@@ -293,10 +293,10 @@ impl WireGuardState {
     // JSON -> wg.conf
     /// 可以用来直接给libwg-go使用。
     ///
-    /// Client mode emits AmneziaWG obfuscation params (`jc/jmin/jmax/s1/s2/h*`)
-    /// so peers can punch through DPI; server mode omits them entirely so
-    /// vanilla WireGuard clients can connect. Server mode also pulls the
-    /// PrivateKey from `.env` if missing on the in-memory struct.
+    /// Client mode adds AmneziaWG obfuscation params (`jc/jmin/jmax/s1/s2/h*`) only
+    /// when `enhance_mode.obfuscate` is true — same idea as server mode clearing
+    /// `amnezia_params` when protocol obfuscation is off. Server mode never emits this
+    /// block here (`build_uapi` handles obfuscation from disk).
     pub fn json_to_wg_config(&self, w: &Wg) -> String {
         let is_server = self.app_mode == AppMode::Server;
 
@@ -315,7 +315,7 @@ impl WireGuardState {
 
         let amnezia_block = if is_server {
             String::new()
-        } else {
+        } else if self.enhance_mode.obfuscate {
             "jc=3\n\
              jmin=10\n\
              jmax=30\n\
@@ -327,6 +327,8 @@ impl WireGuardState {
              h4=66\n\
              i1=<b 0x16feff0000000000000001004c01><t><r 28><r 150>\n"
                 .to_string()
+        } else {
+            String::new()
         };
 
         let mut s = format!(
@@ -519,10 +521,14 @@ mod tests {
 
     #[test]
     fn test_json_to_wg_config() {
+        let priv_b64 = "yMlj3LbVKMW69kXXh0OpbfZUlEVmkYDao3bk6jTl/EQ=";
+        let pub_b64 = "qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=";
+        let psk_b64 = "Z9eygfaOSMvjPRTLDVZ0vTNUOc4EqGKmn0J8GZp+XbQ=";
         let state = WireGuardState::default();
+        assert!(!state.enhance_mode.obfuscate);
         let wg = Wg {
             interface: Interface {
-                private_key: "private_key_123".into(),
+                private_key: priv_b64.into(),
                 listen_port: 51820,
                 address: "10.0.0.1/24".into(),
                 dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
@@ -532,8 +538,8 @@ mod tests {
             peers: vec![Peer {
                 name: None,
                 private_key: None,
-                public_key: "public_key_abc".into(),
-                preshared_key: "preshared_key_def".into(),
+                public_key: pub_b64.into(),
+                preshared_key: psk_b64.into(),
                 allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
                 endpoint: "1.2.3.4:51820".into(),
                 persistent_keepalive: Some(25),
@@ -543,13 +549,45 @@ mod tests {
         let config = state.json_to_wg_config(&wg);
 
         println!("test_json_to_wg_config is : {}", config);
-        assert!(config.contains("private_key=private_key_123"));
+        let priv_hex = WireGuardState::base64_to_hex(priv_b64).unwrap();
+        let pub_hex = WireGuardState::base64_to_hex(pub_b64).unwrap();
+        let psk_hex = WireGuardState::base64_to_hex(psk_b64).unwrap();
+        assert!(config.contains(&format!("private_key={}", priv_hex)));
         assert!(config.contains("listen_port=51820"));
-        assert!(config.contains("public_key=public_key_abc"));
-        assert!(config.contains("preshared_key=preshared_key_def"));
-        assert!(config.contains("allowed_ips=0.0.0.0/0"));
-        assert!(config.contains("allowed_ips=::/0"));
+        assert!(!config.contains("jc=3")); // client + obfuscate off → no Amnezia block
+        assert!(config.contains(&format!("public_key={}", pub_hex)));
+        assert!(config.contains(&format!("preshared_key={}", psk_hex)));
+        assert!(config.contains("allowed_ip=0.0.0.0/0"));
+        assert!(config.contains("allowed_ip=::/0"));
         assert!(config.contains("endpoint=1.2.3.4:51820"));
+    }
+
+    #[test]
+    fn test_json_to_wg_config_client_obfuscation_includes_jc() {
+        let mut state = WireGuardState::default();
+        state.enhance_mode.obfuscate = true;
+        let wg = Wg {
+            interface: Interface {
+                private_key: "yMlj3LbVKMW69kXXh0OpbfZUlEVmkYDao3bk6jTl/EQ=".into(),
+                listen_port: 0,
+                address: "".into(),
+                dns: vec![],
+                mtu: 0,
+                amnezia_params: None,
+            },
+            peers: vec![Peer {
+                name: None,
+                private_key: None,
+                public_key: "qHaIfS7u47/U1AuigBDhOv/p/t6Gy+XKSUdYnPIEKDA=".into(),
+                preshared_key: "".into(),
+                allowed_ips: vec!["0.0.0.0/0".into()],
+                endpoint: "1.2.3.4:51820".into(),
+                persistent_keepalive: None,
+            }],
+        };
+        let config = state.json_to_wg_config(&wg);
+        assert!(config.contains("jc=3\n"));
+        assert!(config.contains("jmin=10\n"));
     }
     #[test]
     fn test_base64_to_hex() {

@@ -209,6 +209,40 @@
               />
             </div>
 
+            <div class="space-y-2">
+              <label class="text-sm font-semibold text-slate-700 dark:text-slate-300">Import from QR</label>
+              <div
+                ref="qrPasteAreaRef"
+                tabindex="0"
+                @paste="onQrPaste"
+                @dragover.prevent
+                @drop.prevent="onQrDrop"
+                class="rounded-xl border border-dashed border-slate-300 bg-slate-50/80 px-4 py-5 text-center text-sm text-slate-600 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-200 dark:border-slate-600 dark:bg-slate-800/50 dark:text-slate-400 dark:focus:border-red-500 dark:focus:ring-red-500/20 cursor-default select-none"
+              >
+                <p>
+                  Click here, then <span class="font-semibold text-slate-800 dark:text-slate-200">Ctrl+V</span>
+                  to paste a QR image, or paste a <span class="font-mono text-xs">wg://</span> link / conf text.
+                </p>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-500">You can also drag a screenshot onto this area.</p>
+                <button
+                  type="button"
+                  class="mt-3 text-sm text-red-600 dark:text-red-400 font-semibold hover:underline"
+                  @click.stop="triggerQrFilePick"
+                >
+                  Choose image file
+                </button>
+                <input
+                  ref="qrFileInputRef"
+                  type="file"
+                  accept="image/*"
+                  class="hidden"
+                  @change="onQrFileChange"
+                />
+              </div>
+              <p v-if="qrImportSuccess" class="text-xs text-emerald-600 dark:text-emerald-400">{{ qrImportSuccess }}</p>
+              <p v-if="qrImportError" class="text-xs text-red-600 dark:text-red-400">{{ qrImportError }}</p>
+            </div>
+
             <div class="space-y-2 flex-1 flex flex-col min-h-0">
               <label class="text-sm font-semibold text-slate-700 dark:text-slate-300">WireGuard Configuration</label>
               <textarea
@@ -248,9 +282,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useWireGuardMode } from '@/composables/useWireGuardMode';
 import { type RawEndpointInfo } from '@/services/wireguard-api';
+import { decodeQrFromImageBlob } from '@/utils/qr-image';
+import { parseWireguardImportPayload } from '@/utils/wg-uri';
 
 const { wireguardStore, endpointsStore } = useWireGuardMode();
 
@@ -263,6 +299,97 @@ const errorMsg = ref('');
 const modalData = ref({
   location: '',
   config: ''
+});
+
+const qrPasteAreaRef = ref<HTMLElement | null>(null);
+const qrFileInputRef = ref<HTMLInputElement | null>(null);
+const qrImportSuccess = ref('');
+const qrImportError = ref('');
+
+function clearQrFeedback() {
+  qrImportSuccess.value = '';
+  qrImportError.value = '';
+}
+
+function applyQrPayload(raw: string) {
+  qrImportError.value = '';
+  qrImportSuccess.value = '';
+  try {
+    modalData.value.config = parseWireguardImportPayload(raw);
+    qrImportSuccess.value = 'Configuration decoded and filled in below.';
+  } catch (e: unknown) {
+    qrImportError.value = e instanceof Error ? e.message : 'Invalid QR content';
+  }
+}
+
+async function importQrFromBlob(blob: Blob) {
+  clearQrFeedback();
+  try {
+    const raw = await decodeQrFromImageBlob(blob);
+    if (!raw) {
+      qrImportError.value = 'No QR code found in this image.';
+      return;
+    }
+    applyQrPayload(raw);
+  } catch (e: unknown) {
+    qrImportError.value = e instanceof Error ? e.message : 'Failed to read image';
+  }
+}
+
+function onQrPaste(e: ClipboardEvent) {
+  const text = e.clipboardData?.getData('text/plain')?.trim();
+  if (
+    text &&
+    (/^wg:\/\//i.test(text) ||
+      /^wireguard:\/\//i.test(text) ||
+      text.includes('[Interface]') ||
+      text.includes('[Peer]'))
+  ) {
+    e.preventDefault();
+    clearQrFeedback();
+    applyQrPayload(text);
+    return;
+  }
+  const items = e.clipboardData?.items;
+  if (!items?.length) return;
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      e.preventDefault();
+      const f = item.getAsFile();
+      if (f) void importQrFromBlob(f);
+      return;
+    }
+  }
+}
+
+function onQrDrop(e: DragEvent) {
+  const f = e.dataTransfer?.files?.[0];
+  if (f?.type.startsWith('image/')) {
+    void importQrFromBlob(f);
+  }
+}
+
+function triggerQrFilePick() {
+  qrFileInputRef.value?.click();
+}
+
+function onQrFileChange(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (file?.type.startsWith('image/')) {
+    void importQrFromBlob(file);
+  }
+}
+
+watch(showModal, async (open) => {
+  if (open) {
+    clearQrFeedback();
+    await nextTick();
+    if (!editingId.value) {
+      qrPasteAreaRef.value?.focus();
+    }
+  }
 });
 
 // Modal Resize Logic
@@ -414,6 +541,7 @@ function closeModal() {
   showModal.value = false;
   editingId.value = null;
   modalData.value = { location: '', config: '' };
+  clearQrFeedback();
   errorMsg.value = '';
   isResized.value = false;
   modalWidth.value = null;

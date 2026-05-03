@@ -168,13 +168,6 @@ class WireGuardApiService {
   }
 
   /**
-   * Get user info
-   */
-  async getUserInfo(): Promise<any> {
-    return await apiClient.get<any>('/api/user_info');
-  }
-  
-  /**
    * Add a custom endpoint
    */
   async addEndpoint(nodeLocation: string, nodeConfig: string): Promise<any> {

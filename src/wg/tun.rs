@@ -4,12 +4,17 @@
 //! - **macOS**: delegates creation to libwg-go's `createTun` (utun via
 //!   PF_SYSTEM, already linked into our binary). Address/MTU configuration
 //!   shells out to `ifconfig`.
-//! - **Linux**: native Rust using `/dev/net/tun` + `TUNSETIFF`. Address/MTU
-//!   configuration shells out to the modern `ip` tool.
+//! - **Linux (server)**: use **libwg-go `createTun`** — same as macOS. Opening
+//!   `/dev/net/tun` via Rust `TUNSETIFF` produced fds that still triggered
+//!   **VirtualTun** fallback (`setMTU` EINVAL / `write virtual-tun: destination address required`).
+//!   IP configuration still uses the `ip` tool in [`configure_address`].
 //! - **Windows**: not yet implemented (wintun.dll not bundled). Returns an
 //!   error so the rest of the system degrades gracefully.
 
-use log::{debug, error, info, warn};
+use log::{debug, info};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use log::{error, warn};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 
 /// Owns a TUN device file descriptor (or, on Windows, would own a wintun
@@ -55,18 +60,9 @@ impl TunDevice {
 
         #[cfg(target_os = "linux")]
         {
-            let fd = linux::open_tun(name)?;
-            // Bring the link up and set MTU. Address is configured separately.
-            run_required(
-                "ip",
-                &["link", "set", "dev", name, "mtu", &mtu.to_string()],
-                "ip link set mtu",
-            )?;
-            run_required(
-                "ip",
-                &["link", "set", "dev", name, "up"],
-                "ip link set up",
-            )?;
+            // Must match how the linked **libwg-go** opens TUN (`CreateTUN`). A Rust-only
+            // `TUNSETIFF` fd still led to VirtualTun + broken `write(2)` on some kernels.
+            let fd = crate::wg::WireGuardApi::create_tun(name, mtu as i32)?;
             Ok(TunDevice {
                 name: name.to_string(),
                 fd,
@@ -89,6 +85,21 @@ impl TunDevice {
     /// Accepts CIDR notation, e.g. `10.88.0.1/24` or `fd00::1/64`. Multiple
     /// addresses can be passed comma-separated.
     pub fn configure_address(&self, addr_with_cidr: &str) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            // One flush before all adds: avoids per-address flush wiping prior `ip addr add`s,
+            // and clears stale `/32`+`/24` duplicates from earlier runs/tools.
+            let _ = run_ok(
+                "ip",
+                &["-4", "addr", "flush", "dev", &self.name],
+                "ip -4 addr flush",
+            );
+            let _ = run_ok(
+                "ip",
+                &["-6", "addr", "flush", "dev", &self.name],
+                "ip -6 addr flush",
+            );
+        }
         for raw in addr_with_cidr.split(',') {
             let addr = raw.trim();
             if addr.is_empty() {
@@ -152,18 +163,6 @@ impl TunDevice {
         #[cfg(target_os = "linux")]
         {
             let cidr = format!("{}/{}", ip_only, prefix);
-            // Best-effort flush of stale addresses for the same family.
-            let _ = run_ok(
-                "ip",
-                &[
-                    if is_ipv6 { "-6" } else { "-4" },
-                    "addr",
-                    "flush",
-                    "dev",
-                    &self.name,
-                ],
-                "ip addr flush",
-            );
             run_required(
                 "ip",
                 &["addr", "add", &cidr, "dev", &self.name],
@@ -201,6 +200,22 @@ impl TunDevice {
             let _ = mtu;
             Err("Windows TUN set_mtu not yet implemented".to_string())
         }
+    }
+
+    /// Linux only: apply `mtu` and `UP` via `ip` **after** `wgTurnOn` has attached to the tun fd.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn linux_apply_mtu_up(&self, mtu: u16) -> Result<(), String> {
+        run_required(
+            "ip",
+            &["link", "set", "dev", &self.name, "mtu", &mtu.to_string()],
+            "ip link set mtu (post-wgTurnOn)",
+        )?;
+        run_required(
+            "ip",
+            &["link", "set", "dev", &self.name, "up"],
+            "ip link set up (post-wgTurnOn)",
+        )?;
+        Ok(())
     }
 
     /// Close the underlying file descriptor and (on Linux) tear the
@@ -294,68 +309,5 @@ fn run_ok(cmd: &str, args: &[&str], label: &str) -> bool {
             error!("{} ({}) spawn error: {}", label, cmd, e);
             false
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Linux implementation: native /dev/net/tun + TUNSETIFF ioctl.
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-mod linux {
-    use libc::{c_int, c_short, c_ulong, ioctl, open, O_NONBLOCK, O_RDWR};
-    use std::ffi::CString;
-
-    // From <linux/if.h> / <linux/if_tun.h>.
-    const IFNAMSIZ: usize = 16;
-    const IFF_TUN: c_short = 0x0001;
-    const IFF_NO_PI: c_short = 0x1000;
-    // _IOW('T', 202, int) on most architectures. 0x400454ca is the canonical value.
-    const TUNSETIFF: c_ulong = 0x400454ca;
-
-    #[repr(C)]
-    struct IfReq {
-        ifr_name: [u8; IFNAMSIZ],
-        ifr_flags: c_short,
-        _padding: [u8; 22],
-    }
-
-    pub(crate) fn open_tun(name: &str) -> Result<i32, String> {
-        if name.as_bytes().len() >= IFNAMSIZ {
-            return Err(format!(
-                "Interface name '{}' exceeds IFNAMSIZ ({} bytes)",
-                name,
-                IFNAMSIZ - 1
-            ));
-        }
-
-        let path = CString::new("/dev/net/tun")
-            .map_err(|e| format!("invalid tun path: {}", e))?;
-        let fd = unsafe { open(path.as_ptr(), O_RDWR | O_NONBLOCK) };
-        if fd < 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(format!(
-                "open(/dev/net/tun) failed: {} (need root + tun module loaded)",
-                err
-            ));
-        }
-
-        let mut req = IfReq {
-            ifr_name: [0; IFNAMSIZ],
-            ifr_flags: IFF_TUN | IFF_NO_PI,
-            _padding: [0; 22],
-        };
-        for (dst, src) in req.ifr_name.iter_mut().zip(name.as_bytes()) {
-            *dst = *src;
-        }
-
-        let rc = unsafe { ioctl(fd, TUNSETIFF as _, &mut req as *mut _ as *mut c_int) };
-        if rc < 0 {
-            let err = std::io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(format!("ioctl(TUNSETIFF) failed: {}", err));
-        }
-
-        Ok(fd)
     }
 }

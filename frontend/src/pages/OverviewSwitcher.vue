@@ -3,10 +3,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, defineAsyncComponent } from 'vue';
 import { useWireGuardStore } from '@/stores/wireguard';
-import ClientOverview from './ClientOverview.vue';
-import ServerOverview from './ServerOverview.vue';
+
+/** Async so the inactive overview is not loaded at runtime (bundler may still list both chunks). */
+const ClientOverview = defineAsyncComponent(() => import('./ClientOverview.vue'));
+const ServerOverview = defineAsyncComponent(() => import('./ServerOverview.vue'));
 
 const wireguardStore = useWireGuardStore();
 
