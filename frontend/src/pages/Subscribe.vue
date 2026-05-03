@@ -14,14 +14,6 @@ const plans = ref<any[]>([]);
 
 onMounted(async () => {
   try {
-    const res = await fetch('/api/user_info');
-    const data = await res.json();
-    deviceId.value = data.device_id;
-  } catch (err) {
-    console.error('Failed to fetch user info:', err);
-  }
-
-  try {
     const res = await fetch('/api/subscribe_plans');
     if (res.ok) {
       plans.value = await res.json();

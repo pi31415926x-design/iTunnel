@@ -268,6 +268,13 @@ const clients = ref<any[]>([]);
 const serverPublicKey = ref<string>('');
 const serverEndpoint = ref<string>('');
 
+/** Endpoint from .env for new peers; skips API placeholders like `<SERVER_ENDPOINT>`. */
+function defaultPeerEndpointFromEnv(): string {
+  const ep = (serverEndpoint.value || '').trim();
+  if (!ep || ep.startsWith('<')) return '';
+  return ep;
+}
+
 const loadPeers = async () => {
   try {
     const res = await fetch('/api/peer_list');
@@ -316,6 +323,7 @@ const formData = ref({
 const openAddPeerModal = async () => {
   isEdit.value = false;
   originalPublicKey.value = '';
+  await loadPeers();
   showModal.value = true;
   // Initialize fields
   formData.value.name = '';
@@ -323,7 +331,7 @@ const openAddPeerModal = async () => {
   formData.value.public_key = '';
   formData.value.preshared_key = '';
   formData.value.allowed_ips = '';
-  formData.value.endpoint = '';
+  formData.value.endpoint = defaultPeerEndpointFromEnv();
   // Auto-generate keys and IP
   await generateKeys();
 };

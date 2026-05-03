@@ -36,6 +36,6 @@ aes = "0.8"
 cfb-mode = "0.8"
 rand = "0.8"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
-rust-embed = "8.11.0"
+rust-embed = { version = "8.11.0", features = ["debug-embed"] }
 mime_guess = "2.0.5"
 

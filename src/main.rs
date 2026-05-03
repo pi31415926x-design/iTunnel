@@ -175,6 +175,17 @@ fn resolve_static_dir_headless() -> PathBuf {
 /// Injects the CLI app mode so the SPA can set `server` / `client` before `/api/mode`, matching the
 /// binary (same as `WireGuardState::app_mode`). Production UI no longer depends on a successful
 /// first `GET /api/mode` to pick ServerOverview vs ClientOverview.
+/// True when the path should only be served as a real file — never replaced by SPA `index.html`.
+fn is_bundled_asset_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    [
+        ".svg", ".ico", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".js", ".mjs", ".css",
+        ".map", ".woff", ".woff2", ".ttf", ".eot", ".json", ".txt", ".wasm", ".webmanifest",
+    ]
+    .iter()
+    .any(|ext| p.ends_with(ext))
+}
+
 fn embed_index_html_with_mode(
     data: std::borrow::Cow<'static, [u8]>,
     mode: itunnel::wg::config::AppMode,
@@ -217,24 +228,36 @@ async fn start_actix_server(
             actix_web::web::get().to(move |req: actix_web::HttpRequest| {
                 let mode = app_mode;
                 async move {
-                let mut path = req.path().trim_start_matches('/');
+                let raw = req.path().trim_start_matches('/');
+                let raw = raw.split('?').next().unwrap_or(raw).trim_end_matches('/');
+                let mut path = raw;
                 if path.is_empty() {
                     path = "index.html";
                 }
-                
+
                 // Check if file exists in the embedded binary
                 if let Some(content) = EmbeddedAssets::get(path) {
-                    let mime_type = mime_guess::from_path(path).first_or_octet_stream();
                     let body: Vec<u8> = if path == "index.html" {
                         embed_index_html_with_mode(content.data, mode)
                     } else {
                         content.data.into_owned()
                     };
+                    if path.ends_with(".svg") {
+                        return HttpResponse::Ok()
+                            .content_type("image/svg+xml")
+                            .body(body);
+                    }
+                    let mime_type = mime_guess::from_path(path).first_or_octet_stream();
                     return HttpResponse::Ok()
                         .content_type(mime_type.as_ref())
                         .body(body);
                 }
-                
+
+                // Do not serve SPA HTML for real asset URLs (e.g. missing favicon): wrong MIME breaks tab icons.
+                if is_bundled_asset_path(path) {
+                    return HttpResponse::NotFound().body("404 Not Found");
+                }
+
                 // Fallback to index.html for SPA History routing
                 if let Some(content) = EmbeddedAssets::get("index.html") {
                     let body = embed_index_html_with_mode(content.data, mode);
@@ -242,8 +265,7 @@ async fn start_actix_server(
                         .content_type("text/html")
                         .body(body);
                 }
-                
-                // Worst case
+
                 HttpResponse::NotFound().body("404 Not Found")
                 }
             })

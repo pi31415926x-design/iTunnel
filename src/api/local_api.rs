@@ -38,6 +38,12 @@ pub async fn get_logs() -> impl Responder {
     HttpResponse::Ok().json(logs)
 }
 
+#[post("/api/logs/clear")]
+pub async fn clear_logs_handler() -> impl Responder {
+    crate::logging::clear_recent_logs();
+    HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+}
+
 #[get("/api/user_info")]
 pub async fn user_info_handler(state: web::Data<Mutex<WireGuardState>>) -> impl Responder {
     let (api_client, device_id) = {
@@ -957,6 +963,7 @@ pub async fn update_endpoint_handler(
 
 pub fn common_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(get_logs)
+       .service(clear_logs_handler)
        .service(get_wg_stats)
        .service(get_wg_config)
        .service(user_info_handler)

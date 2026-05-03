@@ -7,8 +7,9 @@
 //!
 //! Public surface:
 //!
-//! - [`apply_wg_config`]: full client connect routine (TUN, libwg-go, default
-//!   route hijack, host route to the endpoint via the physical gateway).
+//! - [`apply_wg_config`]: full client connect routine (TUN, libwg-go, OS routes,
+//!   default-route hijack (`0.0.0.0/1` + `128.0.0.0/1` style) plus host route to the
+//!   endpoint via the physical gateway. Split-tunnel OS routing is not applied here.
 //! - [`clear_network_config`]: tears down everything that `apply_wg_config`
 //!   installed. Called by `WireGuardState::stop_and_cleanup`.
 //!
@@ -30,6 +31,8 @@
 use crate::wg::config::{ConnectionStatus, WireGuardState};
 use crate::wg::WireGuardApi;
 use log::{debug, error, info, warn};
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
 
 /// Hard-coded TUN name used by the client. Kept identical to the legacy code
 /// so that existing routes survive an upgrade.
@@ -158,7 +161,12 @@ pub fn apply_wg_config(state: &mut WireGuardState) -> Result<i32, String> {
         gateway_ip, endpoint_ip
     );
 
-    if let Err(e) = configure_network(CLIENT_IFACE, tun_ip, &gateway_ip, endpoint_ip) {
+    if let Err(e) = configure_network(
+        CLIENT_IFACE,
+        tun_ip,
+        &gateway_ip,
+        endpoint_ip,
+    ) {
         error!(
             "Failed to configure network: {}, addr:{}, gateway:{}, endpoint:{}",
             e, tun_ip, gateway_ip, endpoint_ip
@@ -182,17 +190,33 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
     let endpoint_ip_str = state.active_endpoint.clone().unwrap_or_default();
     let endpoint_ip = endpoint_ip_str.as_str();
 
+    let allowed_flat: Vec<String> = state
+        .wg_config
+        .as_ref()
+        .map(|w| {
+            w.peers
+                .iter()
+                .flat_map(|p| p.allowed_ips.iter().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let split_nets = ipv4_allowed_nets_for_routing(&allowed_flat);
+    let iface_nets = state
+        .wg_config
+        .as_ref()
+        .map(|w| ipv4_interface_nets_for_routing(&w.interface.address))
+        .unwrap_or_default();
+    let vpn_ipv4_routes = merge_ipv4_prefix_lists(split_nets, iface_nets);
+
     #[cfg(target_os = "macos")]
     {
         let routes = vec![
             ("0.0.0.0/1", "-inet"),
             ("128.0.0.0/1", "-inet"),
-            ("10.99.0.0/24", "-inet"),
             ("224.0.0.0/4", "-inet"),
             ("255.255.255.255", "-inet"),
             ("::/1", "-inet6"),
             ("8000::/1", "-inet6"),
-            ("10.99.0.0/16", "-inet"),
         ];
         for (dest, family) in routes {
             let mut cmd = std::process::Command::new("route");
@@ -201,6 +225,16 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
                 cmd.arg("-net").arg(dest);
             } else {
                 cmd.arg("-host").arg(dest);
+            }
+            let _ = cmd.output();
+        }
+        for (addr, plen) in &vpn_ipv4_routes {
+            let mut cmd = std::process::Command::new("route");
+            cmd.arg("-n").arg("delete").arg("-inet");
+            if *plen == 32 {
+                cmd.arg("-host").arg(addr.to_string());
+            } else {
+                cmd.arg("-net").arg(format!("{}/{}", addr, plen));
             }
             let _ = cmd.output();
         }
@@ -222,10 +256,15 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        let routes = vec!["0.0.0.0/1", "128.0.0.0/1", "10.99.0.0/16"];
-        for dest in routes {
+        for dest in ["0.0.0.0/1", "128.0.0.0/1"] {
             let _ = std::process::Command::new("ip")
                 .args(&["route", "del", dest])
+                .output();
+        }
+        for (addr, plen) in &vpn_ipv4_routes {
+            let cidr = format!("{}/{}", addr, plen);
+            let _ = std::process::Command::new("ip")
+                .args(&["route", "del", &cidr])
                 .output();
         }
         if !endpoint_ip.is_empty() {
@@ -237,14 +276,24 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        let routes = vec![
+        for (dest, mask) in [
             ("0.0.0.0", "128.0.0.0"),
             ("128.0.0.0", "128.0.0.0"),
-            ("10.99.0.0", "255.255.0.0"),
-        ];
-        for (dest, mask) in routes {
+        ] {
             let _ = crate::command_ext::command_new("route")
                 .args(&["DELETE", dest, "MASK", mask])
+                .output();
+        }
+        for (addr, plen) in &vpn_ipv4_routes {
+            let net = ipv4_network_addr(*addr, *plen);
+            let mask = ipv4_prefix_to_netmask(*plen);
+            let _ = crate::command_ext::command_new("route")
+                .args(&[
+                    "DELETE",
+                    &net.to_string(),
+                    "MASK",
+                    &mask.to_string(),
+                ])
                 .output();
         }
         if !endpoint_ip.is_empty() {
@@ -260,6 +309,85 @@ pub fn clear_network_config(state: &mut WireGuardState) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 // Internal helpers (private to client mode)
 // ---------------------------------------------------------------------------
+
+fn ipv4_prefix_to_netmask(plen: u8) -> Ipv4Addr {
+    if plen == 0 {
+        return Ipv4Addr::UNSPECIFIED;
+    }
+    let mask = !(0xFFFF_FFFFu32 >> plen);
+    Ipv4Addr::from(mask)
+}
+
+fn ipv4_network_addr(addr: Ipv4Addr, plen: u8) -> Ipv4Addr {
+    let a = u32::from(addr);
+    if plen == 0 {
+        return Ipv4Addr::UNSPECIFIED;
+    }
+    let mask = !(0xFFFF_FFFFu32 >> plen);
+    Ipv4Addr::from(a & mask)
+}
+
+/// IPv4 prefixes from comma-separated `Address =` (or similar) for route cleanup.
+fn ipv4_interface_nets_for_routing(address_field: &str) -> Vec<(Ipv4Addr, u8)> {
+    ipv4_cidr_strings_to_nets(address_field.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()))
+}
+
+fn ipv4_allowed_nets_for_routing(allowed: &[String]) -> Vec<(Ipv4Addr, u8)> {
+    ipv4_cidr_strings_to_nets(allowed.iter().map(|s| s.as_str()))
+}
+
+fn merge_ipv4_prefix_lists(
+    a: Vec<(Ipv4Addr, u8)>,
+    b: Vec<(Ipv4Addr, u8)>,
+) -> Vec<(Ipv4Addr, u8)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for p in a.into_iter().chain(b) {
+        if seen.insert(p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// IPv4 CIDRs suitable for OS routes / cleanup (skips default route and non-IPv4 tokens).
+fn ipv4_cidr_strings_to_nets<'a>(
+    items: impl Iterator<Item = &'a str>,
+) -> Vec<(Ipv4Addr, u8)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for s in items {
+        let t = s.trim();
+        if t.is_empty() || t.contains(':') {
+            continue;
+        }
+        let (addr_s, plen_opt) = if let Some((a, p)) = t.split_once('/') {
+            (a, p.parse::<u8>().ok())
+        } else {
+            (t, Some(32u8))
+        };
+        let Some(plen) = plen_opt else {
+            continue;
+        };
+        if plen > 32 {
+            continue;
+        }
+        if plen == 0 {
+            continue;
+        }
+        let Ok(addr) = addr_s.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if addr.is_unspecified() {
+            continue;
+        }
+        let key = (addr, plen);
+        if seen.insert(key) {
+            out.push(key);
+        }
+    }
+    out
+}
 
 fn get_gateway_for_ip(target: &str) -> std::io::Result<String> {
     #[cfg(target_os = "macos")]
@@ -457,8 +585,6 @@ fn configure_network(
                 }
             }
 
-            // Default-route hijack, plus broadcast/multicast leak-block to match
-            // wg-quick behavior on macOS.
             let routes = vec![
                 ("0.0.0.0/1", interface_name, "-inet", true),
                 ("128.0.0.0/1", interface_name, "-inet", true),
@@ -545,8 +671,7 @@ fn configure_network(
                     .output()?;
             }
 
-            let routes = vec!["10.99.0.0/16", "0.0.0.0/1", "128.0.0.0/1"];
-            for dest in routes {
+            for dest in ["0.0.0.0/1", "128.0.0.0/1"] {
                 let _ = std::process::Command::new("ip")
                     .args(&["route", "add", dest, "dev", interface_name])
                     .output()?;
@@ -591,17 +716,6 @@ fn configure_network(
             let _ = crate::command_ext::command_new("route")
                 .args(&[
                     "ADD",
-                    "10.99.0.0",
-                    "MASK",
-                    "255.255.0.0",
-                    "0.0.0.0",
-                    "IF",
-                    interface_name,
-                ])
-                .output()?;
-            let _ = crate::command_ext::command_new("route")
-                .args(&[
-                    "ADD",
                     "0.0.0.0",
                     "MASK",
                     "128.0.0.0",
@@ -625,7 +739,7 @@ fn configure_network(
 
         if !endpoint_ip.is_empty() {
             let _ = crate::command_ext::command_new("route")
-                .args(&["ADD", endpoint_ip, "MASK", "255.255.255.255", gateway])
+                .args(&["ADD", endpoint_ip, "MASK", "255.255.255.255", gateway])//TODO: 这里会导致不能打开serer的网页
                 .output()?;
         }
     }
