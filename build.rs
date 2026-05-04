@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    tauri_build::build();
+    run_tauri_build();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -64,6 +64,32 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Security");
         println!("cargo:rustc-link-lib=framework=CoreFoundation");
         println!("cargo:rustc-link-lib=framework=NetworkExtension");
+    }
+}
+
+/// Windows **release** builds embed a manifest that requests elevation (UAC) so `itunnel.exe`
+/// can run `netsh` / routes without a manual "Run as administrator".
+///
+/// Debug builds keep the default manifest so `cargo run` / `tauri dev` still work from a normal shell.
+/// To force the admin manifest in debug, set `ITUNNEL_FORCE_ADMIN_MANIFEST=1`.
+fn run_tauri_build() {
+    println!("cargo:rerun-if-changed=windows/app.manifest");
+    println!("cargo:rerun-if-env-changed=ITUNNEL_FORCE_ADMIN_MANIFEST");
+
+    let target = env::var("TARGET").unwrap_or_default();
+    let profile = env::var("PROFILE").unwrap_or_default();
+    let force_admin = env::var("ITUNNEL_FORCE_ADMIN_MANIFEST").as_deref() == Ok("1");
+
+    let embed_admin_manifest =
+        target.contains("windows") && (profile == "release" || force_admin);
+
+    if embed_admin_manifest {
+        let mut windows = tauri_build::WindowsAttributes::new();
+        windows = windows.app_manifest(include_str!("windows/app.manifest"));
+        let attrs = tauri_build::Attributes::default().windows_attributes(windows);
+        tauri_build::try_build(attrs).expect("tauri build failed");
+    } else {
+        tauri_build::build();
     }
 }
 

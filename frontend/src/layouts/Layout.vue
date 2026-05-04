@@ -61,9 +61,9 @@ onUnmounted(() => {
                 @toggleSidebar="handleToggleSidebar" 
             />
             
-            <!-- Content -->
-            <main class="flex-1 w-full overflow-hidden relative flex flex-col">
-                <router-view />
+            <!-- Content: parent App.vue injects the matched route via default slot -->
+            <main class="flex-1 w-full min-h-0 overflow-hidden relative flex flex-col">
+                <slot />
             </main>
             
             <!-- Footer -->

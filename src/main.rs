@@ -5,9 +5,14 @@
     windows_subsystem = "windows"
 )]
 
+use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer, HttpResponse};
 use rust_embed::RustEmbed;
-use itunnel::{api::{local_api, server_local_api}, logging, wg::config::WireGuardState};
+use itunnel::{
+    api::{local_api, server_local_api, server_session},
+    logging,
+    wg::config::WireGuardState,
+};
 use log::{debug, error, info};
 use std::{
     net::IpAddr,
@@ -212,16 +217,29 @@ async fn start_actix_server(
 ) -> std::io::Result<()> {
     // Wrap the shared state in Actix's Data wrapper
     let wg_data = web::Data::from(wg_state);
+    let server_session_data = match app_mode {
+        itunnel::wg::config::AppMode::Server => {
+            Some(web::Data::new(server_session::ServerSessionState::from_env()))
+        }
+        itunnel::wg::config::AppMode::Client => None,
+    };
 
-    HttpServer::new(move || {
-        
-        let app = App::new()
-            .app_data(wg_data.clone())
-            .configure(local_api::common_routes);
+    let single_worker_for_server_login = matches!(app_mode, itunnel::wg::config::AppMode::Server)
+        && server_session::ServerSessionState::login_required_from_env();
 
-        let app = match app_mode {
-            itunnel::wg::config::AppMode::Client => app.configure(local_api::client_routes),
-            itunnel::wg::config::AppMode::Server => app.configure(server_local_api::server_routes),
+    let mut http_server = HttpServer::new(move || {
+        let app = match server_session_data.as_ref() {
+            None => App::new()
+                .app_data(wg_data.clone())
+                .wrap(from_fn(server_session::server_auth_middleware))
+                .configure(local_api::common_routes)
+                .configure(local_api::client_routes),
+            Some(sd) => App::new()
+                .app_data(wg_data.clone())
+                .app_data(sd.clone())
+                .wrap(from_fn(server_session::server_auth_middleware))
+                .configure(local_api::common_routes)
+                .configure(server_local_api::server_routes),
         };
 
         app.default_service(
@@ -270,10 +288,16 @@ async fn start_actix_server(
                 }
             })
         )
-    })
-    .bind((listen_addr, listen_port))?
-    .run()
-    .await
+    });
+
+    if single_worker_for_server_login {
+        http_server = http_server.workers(1);
+    }
+
+    http_server
+        .bind((listen_addr, listen_port))?
+        .run()
+        .await
 }
 
 // --- Tauri 主程序部分 ---

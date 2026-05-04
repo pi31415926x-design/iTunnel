@@ -1,5 +1,6 @@
 use log::{error, info};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::default::Default;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, Default)]
@@ -158,6 +159,10 @@ pub struct WireGuardState {
     pub enhance_mode: EnhanceMode,              // TCP/Obfuscate/ProxyMode
     pub available_endpoints: Vec<EndpointInfo>, // Available endpoints (from subscription)
     pub selected_endpoint_id: Option<String>,   // Currently selected endpoint
+
+    /// Server mode: base64 public keys of peers kept on disk but not pushed to libwg-go
+    /// (runtime toggle off). `apply_peers` / `start` filter these out of the UAPI peer set.
+    pub server_runtime_excluded_pubkeys: HashSet<String>,
 }
 
 impl WireGuardState {

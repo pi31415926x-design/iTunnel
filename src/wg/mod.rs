@@ -45,14 +45,13 @@ mod ffi {
         pub fn wgSetConfig(tunnel_handle: c_int, settings: *const c_char) -> c_longlong;
 
         // func wgGetConfig(tunnelHandle int32) *C.char
-        // 注意：返回值需要用 libc::free 释放
+        // 注意：由 Go/cgo 分配；在 Windows 上不可用进程内的 libc::free（见 free_go_exported_c_string）。
         pub fn wgGetConfig(tunnel_handle: c_int) -> *mut c_char;
 
         // func wgBumpSockets(tunnelHandle int32)
         pub fn wgBumpSockets(tunnel_handle: c_int);
 
         // func wgVersion() *C.char
-        // 注意：返回值需要用 libc::free 释放
         pub fn wgVersion() -> *mut c_char;
 
         // func createTun(name *C.char, mtu int32) int32
@@ -76,6 +75,23 @@ mod ffi {
 // ============================================================================
 
 pub struct WireGuardApi;
+
+/// `wgGetConfig` / `wgVersion` return `malloc`d C strings from inside **libwg-go**. On Windows
+/// MSVC those allocations live on a different CRT heap than the one `libc::free` in this EXE
+/// uses; calling `free` here corrupts the heap (`STATUS_HEAP_CORRUPTION`). On Windows we
+/// intentionally do not free (small leak per call; OS reclaims at process exit). On Unix we
+/// keep `libc::free`, which matches the typical Go cgo + glibc layout for this library.
+unsafe fn free_go_exported_c_string(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    #[cfg(not(windows))]
+    libc::free(ptr as *mut c_void);
+    #[cfg(windows)]
+    {
+        let _ = ptr;
+    }
+}
 
 /// 日志级别枚举
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +171,7 @@ impl WireGuardApi {
                 return "unknown".to_string();
             }
             let res = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            libc::free(ptr as *mut c_void); // 必须释放 Go 分配的内存
+            free_go_exported_c_string(ptr);
             res
         }
     }
@@ -220,7 +236,7 @@ impl WireGuardApi {
                 return None;
             }
             let res = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            libc::free(ptr as *mut c_void); // 必须释放 Go 分配的内存
+            free_go_exported_c_string(ptr);
             Some(res)
         }
     }

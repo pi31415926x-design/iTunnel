@@ -8,14 +8,16 @@
 //!   `/dev/net/tun` via Rust `TUNSETIFF` produced fds that still triggered
 //!   **VirtualTun** fallback (`setMTU` EINVAL / `write virtual-tun: destination address required`).
 //!   IP configuration still uses the `ip` tool in [`configure_address`].
-//! - **Windows**: not yet implemented (wintun.dll not bundled). Returns an
-//!   error so the rest of the system degrades gracefully.
+//! - **Windows (server)**: **libwg-go `createTun`** (Wintun). Place **wintun.dll**
+//!   next to the executable. IPv4 is configured with **netsh** after `wgTurnOn`.
 
-use log::{debug, info};
+use log::{debug, info, warn};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use log::{error, warn};
+use log::error;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use crate::command_ext::command_new;
 
 /// Owns a TUN device file descriptor (or, on Windows, would own a wintun
 /// session handle). Closing is explicit via [`TunDevice::close`]; if the
@@ -72,12 +74,12 @@ impl TunDevice {
 
         #[cfg(target_os = "windows")]
         {
-            let _ = (name, mtu);
-            Err(
-                "Windows TUN (wintun.dll) is not bundled in this build. \
-                 Server mode is currently macOS/Linux only."
-                    .to_string(),
-            )
+            let fd = crate::wg::WireGuardApi::create_tun(name, mtu as i32)?;
+            Ok(TunDevice {
+                name: name.to_string(),
+                fd,
+                mtu,
+            })
         }
     }
 
@@ -100,16 +102,33 @@ impl TunDevice {
                 "ip -6 addr flush",
             );
         }
-        for raw in addr_with_cidr.split(',') {
-            let addr = raw.trim();
-            if addr.is_empty() {
-                continue;
+        #[cfg(target_os = "windows")]
+        {
+            let parts: Vec<&str> = addr_with_cidr
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            for (i, addr) in parts.iter().enumerate() {
+                windows_apply_address_on_iface(&self.name, addr, i == 0)?;
             }
-            self.configure_one_address(addr)?;
+            return Ok(());
         }
-        Ok(())
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            for raw in addr_with_cidr.split(',') {
+                let addr = raw.trim();
+                if addr.is_empty() {
+                    continue;
+                }
+                self.configure_one_address(addr)?;
+            }
+            Ok(())
+        }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn configure_one_address(&self, addr: &str) -> Result<(), String> {
         let is_ipv6 = addr.contains(':');
         let (ip_only, prefix) = match addr.split_once('/') {
@@ -169,12 +188,6 @@ impl TunDevice {
                 "ip addr add",
             )
         }
-
-        #[cfg(target_os = "windows")]
-        {
-            let _ = (ip_only, prefix, is_ipv6);
-            Err("Windows TUN address configuration not yet implemented".to_string())
-        }
     }
 
     /// Adjust MTU after creation if needed.
@@ -197,8 +210,16 @@ impl TunDevice {
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = mtu;
-            Err("Windows TUN set_mtu not yet implemented".to_string())
+            match windows_netsh_mtu_ok(&self.name, mtu) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    warn!(
+                        "[tun] netsh mtu on {} (tunnel may still use default MTU): {}",
+                        self.name, e
+                    );
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -233,7 +254,7 @@ impl TunDevice {
             );
         }
 
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             if self.fd > 0 {
                 let rc = unsafe { libc::close(self.fd) };
@@ -249,6 +270,101 @@ impl TunDevice {
 
         Ok(())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn prefix_to_netmask_v4_windows(prefix: &str) -> Result<String, String> {
+    let p: u32 = prefix
+        .parse()
+        .map_err(|e| format!("Invalid IPv4 prefix '{}': {}", prefix, e))?;
+    if p > 32 {
+        return Err(format!("IPv4 prefix '{}' out of range", prefix));
+    }
+    let mask: u32 = if p == 0 { 0 } else { 0xFFFF_FFFFu32 << (32 - p) };
+    Ok(format!(
+        "{}.{}.{}.{}",
+        (mask >> 24) & 0xff,
+        (mask >> 16) & 0xff,
+        (mask >> 8) & 0xff,
+        mask & 0xff
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_apply_address_on_iface(iface: &str, addr: &str, is_first: bool) -> Result<(), String> {
+    let is_ipv6 = addr.contains(':');
+    let (ip_only, prefix) = match addr.split_once('/') {
+        Some((ip, p)) => (ip.trim(), p.to_string()),
+        None => (
+            addr.trim(),
+            if is_ipv6 {
+                "128".to_string()
+            } else {
+                "32".to_string()
+            },
+        ),
+    };
+    if is_ipv6 {
+        warn!(
+            "[tun] Skipping IPv6 address {} on {} (server Windows path is IPv4-only)",
+            addr, iface
+        );
+        return Ok(());
+    }
+    let mask = prefix_to_netmask_v4_windows(&prefix)?;
+    let name_arg = format!("name=\"{}\"", iface);
+    let mut cmd = command_new("netsh");
+    cmd.arg("interface").arg("ip");
+    if is_first {
+        cmd.arg("set")
+            .arg("address")
+            .arg(&name_arg)
+            .arg("source=static")
+            .arg(format!("addr={}", ip_only))
+            .arg(format!("mask={}", mask));
+    } else {
+        cmd.arg("add")
+            .arg("address")
+            .arg(&name_arg)
+            .arg(format!("addr={}", ip_only))
+            .arg(format!("mask={}", mask));
+    }
+    debug!("[tun] netsh {:?}", cmd);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("netsh address spawn: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(format!(
+            "netsh address on {}: status={} stderr={} stdout={}",
+            iface,
+            out.status,
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_netsh_mtu_ok(iface: &str, mtu: u16) -> Result<(), String> {
+    let name_arg = format!("interface=\"{}\"", iface);
+    let mtu_arg = format!("mtu={}", mtu);
+    let out = command_new("netsh")
+        .arg("interface")
+        .arg("ipv4")
+        .arg("set")
+        .arg("subinterface")
+        .arg(&name_arg)
+        .arg(&mtu_arg)
+        .arg("store=active")
+        .output()
+        .map_err(|e| format!("netsh mtu spawn: {}", e))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
